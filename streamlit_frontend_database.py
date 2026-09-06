@@ -1,6 +1,6 @@
 import streamlit as st
-from langgraph_database_backend import chatbot, retrieve_all_threads
 from langchain_core.messages import HumanMessage
+from langgraph_tool_backend import chatbot, retrieve_all_threads
 import uuid
 
 # **************************************** utility functions *************************
@@ -90,15 +90,12 @@ if user_input:
         "run_name": "chat_turn",
     }
 
-    # first add the message to message_history
     with st.chat_message('assistant'):
-
-        ai_message = st.write_stream(
-            message_chunk.content for message_chunk, metadata in chatbot.stream(
-                {'messages': [HumanMessage(content=user_input)]},
-                config= CONFIG,
-                stream_mode= 'messages'
-            )
+        response = chatbot.invoke(
+            {'messages': [HumanMessage(content=user_input)]},
+            config=CONFIG
         )
+        ai_message = response['messages'][-1].content
+        st.write(ai_message)
 
     st.session_state['message_history'].append({'role': 'assistant', 'content': ai_message})

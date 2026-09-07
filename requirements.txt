@@ -1,15 +1,39 @@
+# ── Core LangChain / LangGraph ──────────────────────────────────────────────
 langchain==0.3.27
 langchain-core==0.3.86
 langchain-community
 langgraph==0.6.1
 langgraph-checkpoint-sqlite
 langchain-mcp-adapters==0.1.14
+
+# ── LLM ─────────────────────────────────────────────────────────────────────
 langchain-groq==0.3.6
+
+# ── Embeddings (local, no API key) ───────────────────────────────────────────
 langchain-huggingface==0.3.1
 sentence-transformers
-pypdf
+
+# ── Vector store ─────────────────────────────────────────────────────────────
 faiss-cpu
+
+# ── Document loading ─────────────────────────────────────────────────────────
+pypdf
+
+# ── Web search (no API key) ──────────────────────────────────────────────────
 duckduckgo-search
 ddgs
+
+# ── Frontend ─────────────────────────────────────────────────────────────────
 streamlit==1.47.1
+
+# ── Config ───────────────────────────────────────────────────────────────────
 python-dotenv==1.1.1
+
+# ── HTTP ─────────────────────────────────────────────────────────────────────
+requests
+
+# ── Async SQLite (for MCP backend) ───────────────────────────────────────────
+aiosqlite
+
+# ── Type hints ───────────────────────────────────────────────────────────────
+typing-extensions>=4.0

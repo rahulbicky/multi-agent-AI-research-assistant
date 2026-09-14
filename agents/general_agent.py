@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from core.config import settings
+from core.context import trim_history
 from core.state import AgentState
 from tools.tools import GENERAL_TOOLS
 from tools.mcp_tools import load_mcp_tools
@@ -67,8 +68,12 @@ _llm_with_tools, _tools = _build_general_llm()
 
 def general_node(state: AgentState) -> AgentState:
     """Main LLM node — may answer directly or call a tool."""
-    messages = [SystemMessage(content=GENERAL_SYSTEM_PROMPT), *state["messages"]]
-    response = _llm_with_tools.invoke(messages)
+    messages = [SystemMessage(content=GENERAL_SYSTEM_PROMPT), *trim_history(state["messages"])]
+    try:
+        response = _llm_with_tools.invoke(messages)
+    except Exception as exc:
+        logger.error("General agent LLM error: %s", exc)
+        response = AIMessage(content="⚠️ I ran into an error answering that. Please try again.")
     return {**state, "messages": [response], "agent_name": "General"}
 
 

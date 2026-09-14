@@ -11,6 +11,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import uuid
 import logging
 
@@ -235,6 +236,21 @@ html, body, [data-testid="stAppViewContainer"] {
 
 /* ── Divider ── */
 hr { border-color: #1e1e2e !important; }
+
+/* ── Sources expander ── */
+[data-testid="stExpander"] {
+    background: #1c1c28 !important;
+    border: 1px solid #2a2a3a !important;
+    border-radius: 10px !important;
+}
+
+/* ── Responsive: narrow / mobile screens ── */
+@media (max-width: 640px) {
+    .capability-grid { grid-template-columns: 1fr; }
+    .hero-title { font-size: 2rem; }
+    .hero-header { padding: 32px 12px 24px; }
+    [data-testid="stMain"], .main .block-container { padding-left: 8px !important; padding-right: 8px !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -254,6 +270,20 @@ def render_agent_badge(agent_name: str | None) -> str:
         return ""
     css_class, label = AGENT_BADGES.get(agent_name, ("badge-general", agent_name))
     return f'<span class="agent-badge {css_class}">{label}</span>'
+
+
+# Friendly icon + label per tool, shown while a tool is executing.
+TOOL_STATUS_LABELS = {
+    "duckduckgo_search": ("🌐", "Searching the web"),
+    "rag_tool": ("📄", "Searching the document"),
+    "calculator": ("🧮", "Calculating"),
+    "get_stock_price": ("📈", "Fetching stock price"),
+}
+
+
+def tool_status_label(tool_name: str) -> str:
+    icon, label = TOOL_STATUS_LABELS.get(tool_name, ("🔧", f"Using `{tool_name}`"))
+    return f"{icon} {label}…"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -292,6 +322,9 @@ def _init_session():
     if "session_docs" not in st.session_state:
         st.session_state["session_docs"] = {}
 
+    if "pending_upload_confirmation" not in st.session_state:
+        st.session_state["pending_upload_confirmation"] = None
+
 
 _init_session()
 
@@ -309,6 +342,7 @@ def new_chat():
     new_tid = str(uuid.uuid4())
     st.session_state["thread_id"] = new_tid
     st.session_state["message_history"] = []
+    st.session_state["pending_upload_confirmation"] = None
     st.session_state["thread_titles"][new_tid] = "New Chat"
 
 
@@ -392,6 +426,7 @@ with st.sidebar:
                     if composite_key not in session_docs:
                         session_docs[composite_key] = []
                     session_docs[composite_key].append(meta)
+                    st.session_state["pending_upload_confirmation"] = meta["filename"]
                     st.write(f"✅ **{meta['filename']}**")
                     pages_info = f"{meta['non_empty_pages']} usable / {meta['documents']} total pages"
                     st.write(f"   {pages_info} · {meta['chunks']} chunks")
@@ -509,16 +544,59 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    pending_filename = st.session_state.get("pending_upload_confirmation")
+    if not pending_filename and current_docs:
+        pending_filename = current_docs[-1].get("filename")
+    normalized_input = user_input.strip().lower().rstrip(".!?")
+    if pending_filename and normalized_input in {
+        "i have uploaded",
+        "i uploaded",
+        "uploaded",
+    }:
+        st.session_state["pending_upload_confirmation"] = None
+        confirmation = (
+            f"✅ **{pending_filename}** is uploaded and ready.\n\n"
+            "Try asking: *What is the main topic?* or *Summarize the key findings.*"
+        )
+        with st.chat_message("assistant"):
+            st.markdown(render_agent_badge("RAG"), unsafe_allow_html=True)
+            st.markdown(confirmation)
+        message_history.append({
+            "role": "assistant",
+            "content": confirmation,
+            "agent_name": "RAG",
+        })
+        st.session_state["message_history"] = message_history
+        st.stop()
+
+    st.session_state["pending_upload_confirmation"] = None
+
     # Build LangGraph config (isolated per user+thread)
     config = make_config(user_id, thread_id)
 
     # ── Stream the assistant response ──
     with st.chat_message("assistant"):
-        status_holder = {"box": None, "agent": None}
+        status_holder = {"box": None, "error": False}
+        sources_holder = {"web": [], "rag_pages": set()}
         badge_placeholder = st.empty()
+        thinking_placeholder = st.empty()
+        thinking_placeholder.markdown(
+            '<span style="color:#6b7280;">🧭 Thinking…</span>', unsafe_allow_html=True
+        )
+
+        def _parse_tool_payload(raw_content) -> dict | None:
+            """Best-effort JSON parse of a tool's structured output."""
+            if not isinstance(raw_content, str):
+                return None
+            try:
+                payload = json.loads(raw_content)
+                return payload if isinstance(payload, dict) else None
+            except (ValueError, TypeError):
+                return None
 
         def stream_response():
             """Generator yielding text tokens from the multi-agent graph."""
+            first_token = True
             try:
                 for message_chunk, metadata in chatbot.stream(
                     {
@@ -540,16 +618,31 @@ if user_input:
                     # ── Tool execution indicator ──
                     if isinstance(message_chunk, ToolMessage):
                         tool_name = getattr(message_chunk, "name", "tool")
+                        label = tool_status_label(tool_name)
                         if status_holder["box"] is None:
-                            status_holder["box"] = st.status(
-                                f"🔧 Using `{tool_name}`…", expanded=True
-                            )
+                            status_holder["box"] = st.status(label, expanded=True)
                         else:
-                            status_holder["box"].update(
-                                label=f"🔧 Using `{tool_name}`…",
-                                state="running",
-                                expanded=True,
-                            )
+                            status_holder["box"].update(label=label, state="running", expanded=True)
+
+                        # Best-effort: surface a short progress line + capture sources.
+                        payload = _parse_tool_payload(message_chunk.content)
+                        if payload:
+                            if payload.get("error"):
+                                status_holder["box"].write(f"⚠️ {payload['error']}")
+                            elif tool_name == "duckduckgo_search" and payload.get("results"):
+                                results = payload["results"]
+                                status_holder["box"].write(f"Found {len(results)} result(s)")
+                                for r in results[:5]:
+                                    if r.get("title") and r.get("link"):
+                                        entry = {"title": r["title"], "link": r["link"]}
+                                        if entry not in sources_holder["web"]:
+                                            sources_holder["web"].append(entry)
+                            elif tool_name == "rag_tool" and payload.get("passages"):
+                                passages = payload["passages"]
+                                status_holder["box"].write(f"Retrieved {len(passages)} passage(s)")
+                                for p in passages:
+                                    if p.get("page"):
+                                        sources_holder["rag_pages"].add(p["page"])
 
                     # ── AI response tokens (skip tool-call-only messages with no text) ──
                     if isinstance(message_chunk, AIMessage) and message_chunk.content:
@@ -557,19 +650,30 @@ if user_input:
                         tool_calls = getattr(message_chunk, "tool_calls", [])
                         if tool_calls and not str(message_chunk.content).strip():
                             continue
+                        if first_token:
+                            thinking_placeholder.empty()
+                            first_token = False
                         yield message_chunk.content
 
             except Exception as exc:
                 logger.error("Graph stream error: %s", exc)
-                yield f"\n\n⚠️ An error occurred: {exc}"
+                thinking_placeholder.empty()
+                status_holder["error"] = True
+                if status_holder["box"] is not None:
+                    status_holder["box"].update(state="error", expanded=True)
+                yield f"\n\n⚠️ Something went wrong while generating a response: {exc}"
 
         ai_response = st.write_stream(stream_response())
+        thinking_placeholder.empty()
 
         # Resolve tool status indicator
         if status_holder["box"] is not None:
-            status_holder["box"].update(
-                label="✅ Tool finished", state="complete", expanded=False
-            )
+            if status_holder["error"]:
+                status_holder["box"].update(label="⚠️ Tool error", state="error", expanded=True)
+            else:
+                status_holder["box"].update(
+                    label="✅ Tool finished", state="complete", expanded=False
+                )
 
         # Retrieve agent name from final graph state
         try:
@@ -580,6 +684,15 @@ if user_input:
 
         # Show agent badge
         badge_placeholder.markdown(render_agent_badge(agent_name), unsafe_allow_html=True)
+
+        # ── Sources panel (web links / document pages used for this answer) ──
+        if sources_holder["web"] or sources_holder["rag_pages"]:
+            with st.expander("🔗 Sources", expanded=False):
+                for s in sources_holder["web"]:
+                    st.markdown(f"- [{s['title']}]({s['link']})")
+                if sources_holder["rag_pages"]:
+                    pages = ", ".join(str(p) for p in sorted(sources_holder["rag_pages"]))
+                    st.markdown(f"- 📄 Document page(s): {pages}")
 
     # Save to display history
     message_history.append({

@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import ToolNode
 
 from core.config import settings
+from core.context import trim_history
 from core.state import AgentState
 from tools.tools import RAG_TOOLS, get_retriever
 
@@ -32,21 +33,31 @@ logger = logging.getLogger(__name__)
 
 RAG_SYSTEM_PROMPT = """You are a document analysis assistant.
 
-You have access to:
-  - rag_tool: Retrieves relevant passages from the uploaded PDF document.
-  - search_tool: Falls back to web search if the document doesn't contain the answer.
-  - calculator: For any numeric computations needed.
+You have access to these sources:
+     - rag_tool: Retrieves relevant passages from the uploaded PDF document.
+     - duckduckgo_search: Searches the live web for current or supplementary information.
+     - calculator: Performs numeric calculations when needed.
 
 Your process:
 1. Use rag_tool to retrieve relevant passages from the document.
-2. Answer the question based on the retrieved passages.
-3. If the document does not contain the answer, say so clearly and optionally
-   use the web search tool for supplementary information.
+2. Use duckduckgo_search when the question needs current information, when
+    supplementary context is useful, or when the PDF has no relevant answer.
+3. Combine the sources into one clear answer, clearly separating:
+    - **From the uploaded PDF:** facts supported by retrieved passages, with page citations.
+    - **From the web:** current or supplementary facts, with links to returned sources.
+4. If the PDF has no relevant information, say exactly:
+    "I couldn't find this information in the uploaded PDF."
+    Then provide the useful web answer under **From the web** when search results support it.
 
 Rules:
 - Always use rag_tool FIRST for document questions.
 - Always pass the user_id and thread_id arguments to rag_tool.
 - Quote or paraphrase from the document — do not fabricate.
+- Each retrieved passage includes a page number. Cite it inline, e.g. "(p. 4)",
+  next to the fact it supports, so the user can verify it in the source PDF.
+- Never present web information as if it came from the PDF.
+- Never present PDF information as if it came from the web.
+- Include a **Sources** section with the web links actually returned by the search tool.
 - If no document is uploaded, politely ask the user to upload one.
 """
 
@@ -94,14 +105,20 @@ def rag_node(state: AgentState) -> AgentState:
         # No document — politely redirect
         messages = [
             SystemMessage(content=RAG_NO_DOCUMENT_PROMPT),
-            *state["messages"],
+            *trim_history(state["messages"]),
         ]
         llm = ChatGroq(
             model=settings.groq_model,
             temperature=0.2,
             api_key=settings.groq_api_key,
         )
-        response = llm.invoke(messages)
+        try:
+            response = llm.invoke(messages)
+        except Exception as exc:
+            logger.error("RAG (no-document) LLM error: %s", exc)
+            response = AIMessage(
+                content="⚠️ I ran into an error. Please try again, or upload a PDF from the sidebar."
+            )
         return {**state, "messages": [response], "agent_name": "RAG"}
 
     # Document available — run RAG with tool calling
@@ -112,8 +129,14 @@ def rag_node(state: AgentState) -> AgentState:
             + "\nWhen calling rag_tool, pass these values as the user_id and thread_id arguments."
         )
     )
-    messages = [system, *state["messages"]]
-    response = _rag_llm.invoke(messages)
+    messages = [system, *trim_history(state["messages"])]
+    try:
+        response = _rag_llm.invoke(messages)
+    except Exception as exc:
+        logger.error("RAG agent LLM error: %s", exc)
+        response = AIMessage(
+            content="⚠️ I ran into an error while reading the document. Please try again."
+        )
     return {**state, "messages": [response], "agent_name": "RAG"}
 
 

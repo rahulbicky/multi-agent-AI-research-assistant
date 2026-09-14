@@ -13,14 +13,18 @@ Falls back to "general" on any error so the system never crashes.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from core.config import settings
+from core.context import recent_exchange_summary
 from core.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+VALID_ROUTES = {"general", "research", "rag", "coding"}
 
 # ---------------------------------------------------------------------------
 # Routing model — light, fast, temperature=0 for deterministic routing
@@ -70,6 +74,23 @@ Respond with EXACTLY ONE WORD — the category name. No punctuation, no explanat
 """
 
 
+def _extract_route(raw: str) -> Optional[str]:
+    """
+    Parse the router LLM's reply into one of VALID_ROUTES.
+
+    Tolerant of extra punctuation/words the model may add (e.g. "research.",
+    "Category: research") — looks for an exact match first, then falls back
+    to searching for a valid route word anywhere in the reply.
+    """
+    cleaned = raw.strip().lower().strip(" .:!\"'`")
+    if cleaned in VALID_ROUTES:
+        return cleaned
+    for route in VALID_ROUTES:
+        if route in cleaned:
+            return route
+    return None
+
+
 def supervisor_node(state: AgentState) -> AgentState:
     """
     Inspect the last human message and route to the correct agent.
@@ -89,28 +110,36 @@ def supervisor_node(state: AgentState) -> AgentState:
         logger.debug("Supervisor: no human message found, defaulting to general")
         return {**state, "next_agent": "general"}
 
-    try:
-        response = _router_llm.invoke(
-            [
-                SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
-                HumanMessage(content=last_human),
-            ]
+    # A short slice of recent turns helps route follow-up questions
+    # ("what about last year?") that only make sense with context.
+    context = recent_exchange_summary(messages)
+    prompt_messages = [SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT)]
+    if context:
+        prompt_messages.append(
+            SystemMessage(content=f"Recent conversation context (for reference only):\n{context}")
         )
-        route = response.content.strip().lower()
+    prompt_messages.append(HumanMessage(content=last_human))
 
-        # Normalise to valid options
-        if route not in {"general", "research", "rag", "coding"}:
-            logger.warning(
-                "Supervisor returned unexpected route '%s', defaulting to general", route
-            )
-            route = "general"
+    # Try once, and retry once more on an unparseable (not a failed-call) reply.
+    for attempt in range(2):
+        try:
+            response = _router_llm.invoke(prompt_messages)
+        except Exception as exc:
+            logger.error("Supervisor classification error: %s — defaulting to general", exc)
+            return {**state, "next_agent": "general"}
 
-        logger.info("Supervisor routed '%s...' → %s", last_human[:60], route)
-        return {**state, "next_agent": route}
+        route = _extract_route(str(response.content))
+        if route:
+            logger.info("Supervisor routed '%s...' → %s", last_human[:60], route)
+            return {**state, "next_agent": route}
 
-    except Exception as exc:
-        logger.error("Supervisor classification error: %s — defaulting to general", exc)
-        return {**state, "next_agent": "general"}
+        logger.warning(
+            "Supervisor returned unparseable route '%s' (attempt %d/2)",
+            response.content, attempt + 1,
+        )
+
+    logger.warning("Supervisor could not classify '%s...', defaulting to general", last_human[:60])
+    return {**state, "next_agent": "general"}
 
 
 # ---------------------------------------------------------------------------

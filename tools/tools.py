@@ -15,10 +15,10 @@ import os
 import tempfile
 from typing import Any, Dict, List, Optional
 
+from ddgs import DDGS
 import requests
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_community.vectorstores import FAISS
 from langchain_core.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -158,7 +158,7 @@ def ingest_pdf(
             ) from faiss_exc
 
         retriever = vector_store.as_retriever(
-            search_type="similarity", search_kwargs={"k": 4}
+            search_type="similarity", search_kwargs={"k": 5}
         )
 
         _RETRIEVERS[key] = retriever
@@ -185,10 +185,45 @@ def ingest_pdf(
 
 
 # ---------------------------------------------------------------------------
-# Tool: DuckDuckGo web search
+# Tool: DuckDuckGo web search — structured results (title + link + snippet)
+# ---------------------------------------------------------------------------
+# A plain DuckDuckGoSearchRun only returns a blob of concatenated snippet
+# text with no links, so answers could never cite real sources. This wraps
+# the same underlying API but keeps titles/links so agents can present and
+# cite sources instead of just paraphrasing search text.
 # ---------------------------------------------------------------------------
 
-search_tool = DuckDuckGoSearchRun(region="us-en")
+@tool
+def duckduckgo_search(query: str) -> dict:
+    """
+    Search the live web via DuckDuckGo.
+    Returns a structured list of results (title, link, snippet) so the
+    answer can cite real, clickable sources instead of just search text.
+    """
+    try:
+        raw_results = list(DDGS().text(query, max_results=5))
+    except Exception as exc:
+        logger.error("Web search failed for '%s': %s", query, exc)
+        return {"query": query, "results": [], "error": str(exc)}
+
+    if not raw_results:
+        return {"query": query, "results": [], "message": "No results found."}
+
+    return {
+        "query": query,
+        "results": [
+            {
+                "title": (r.get("title") or "").strip(),
+                "link": (r.get("href") or "").strip(),
+                "snippet": (r.get("body") or "").strip(),
+            }
+            for r in raw_results
+        ],
+    }
+
+
+# Backward-compatible alias — used throughout this module's tool lists.
+search_tool = duckduckgo_search
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +299,9 @@ def get_stock_price(symbol: str) -> dict:
 @tool
 def rag_tool(query: str, user_id: str = "", thread_id: str = "") -> dict:
     """
-    Retrieve relevant information from the uploaded PDF document for this
+    Retrieve relevant passages from the uploaded PDF document for this
     conversation.  Always pass user_id and thread_id when calling this tool.
+    Each passage includes its source page number so the answer can cite it.
     """
     retriever = get_retriever(user_id, thread_id)
     if retriever is None:
@@ -276,10 +312,19 @@ def rag_tool(query: str, user_id: str = "", thread_id: str = "") -> dict:
 
     try:
         results = retriever.invoke(query)
+        passages = []
+        for doc in results:
+            page = doc.metadata.get("page")
+            passages.append(
+                {
+                    "content": doc.page_content,
+                    # PyPDFLoader pages are 0-indexed internally — show human page numbers.
+                    "page": (page + 1) if isinstance(page, int) else None,
+                }
+            )
         return {
             "query": query,
-            "context": [doc.page_content for doc in results],
-            "metadata": [doc.metadata for doc in results],
+            "passages": passages,
             "source_files": [
                 m.get("filename") for m in get_retriever_meta(user_id, thread_id)
             ],

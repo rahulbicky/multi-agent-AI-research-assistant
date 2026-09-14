@@ -20,6 +20,7 @@ from langchain_groq import ChatGroq
 from langgraph.prebuilt import ToolNode
 
 from core.config import settings
+from core.context import trim_history
 from core.state import AgentState
 from tools.tools import RESEARCH_TOOLS
 
@@ -51,13 +52,18 @@ If the search results do not contain the answer, say so honestly.
 
 SYNTHESIS_SYSTEM_PROMPT = """You are a research analyst producing a final answer.
 
-Tool results are already in the conversation. Use them to:
+Tool results are already in the conversation. Each duckduckgo_search result
+includes a title, link, and snippet. Use them to:
 - Write a clear, direct answer to the user's question
 - Cite specific facts from the search results
+- End with a "**Sources:**" section listing the 2-4 most relevant results as
+  markdown links, e.g. "- [Title](https://link)" — only include links that
+  were actually returned by the search tool, never invent one
 - Note if information seems outdated or conflicting
 - Do NOT call any more tools
 - Do NOT add information not present in the tool results
-- If tool results are empty or unhelpful, say you could not find reliable information
+- If tool results are empty or unhelpful, say you could not find reliable
+  information and omit the Sources section
 """
 
 # ---------------------------------------------------------------------------
@@ -89,8 +95,14 @@ research_tool_node = ToolNode(RESEARCH_TOOLS)
 
 def research_node(state: AgentState) -> AgentState:
     """Main research node — decides whether to call tools or synthesise."""
-    messages = [SystemMessage(content=RESEARCH_SYSTEM_PROMPT), *state["messages"]]
-    response = _research_llm.invoke(messages)
+    messages = [SystemMessage(content=RESEARCH_SYSTEM_PROMPT), *trim_history(state["messages"])]
+    try:
+        response = _research_llm.invoke(messages)
+    except Exception as exc:
+        logger.error("Research agent LLM error: %s", exc)
+        response = AIMessage(
+            content="⚠️ I ran into an error while starting research on that. Please try again."
+        )
     return {**state, "messages": [response], "agent_name": "Research"}
 
 
@@ -99,8 +111,14 @@ def research_synthesis_node(state: AgentState) -> AgentState:
     Synthesis node — runs after tool results are in the conversation.
     Produces a final, clean answer without calling additional tools.
     """
-    messages = [SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT), *state["messages"]]
-    response = _synthesis_llm.invoke(messages)
+    messages = [SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT), *trim_history(state["messages"])]
+    try:
+        response = _synthesis_llm.invoke(messages)
+    except Exception as exc:
+        logger.error("Research synthesis LLM error: %s", exc)
+        response = AIMessage(
+            content="⚠️ I found some search results but ran into an error summarising them. Please try again."
+        )
     return {**state, "messages": [response], "agent_name": "Research"}
 
 

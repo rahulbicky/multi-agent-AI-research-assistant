@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import ToolNode
 
 from core.config import settings
+from core.context import trim_history
 from core.state import AgentState
 from tools.tools import CODING_TOOLS
 
@@ -72,8 +73,12 @@ coding_tool_node = ToolNode(CODING_TOOLS)
 
 def coding_node(state: AgentState) -> AgentState:
     """Coding agent node — generates, reviews, or debugs code."""
-    messages = [SystemMessage(content=CODING_SYSTEM_PROMPT), *state["messages"]]
-    response = _coding_llm.invoke(messages)
+    messages = [SystemMessage(content=CODING_SYSTEM_PROMPT), *trim_history(state["messages"])]
+    try:
+        response = _coding_llm.invoke(messages)
+    except Exception as exc:
+        logger.error("Coding agent LLM error: %s", exc)
+        response = AIMessage(content="⚠️ I ran into an error generating that. Please try again.")
     return {**state, "messages": [response], "agent_name": "Coding"}
 
 

@@ -1,19 +1,31 @@
 """
-streamlit_app.py
+frontend/app.py
 ================
 Multi-Agent AI Research Chatbot — Main Entry Point.
 
 ChatGPT / Gemini-style UI backed by a LangGraph multi-agent system.
 
-Run:
-    streamlit run streamlit_app.py
+Run (from the project root):
+    streamlit run frontend/app.py
+    # or
+    python run.py
 """
 
 from __future__ import annotations
 
 import json
-import uuid
 import logging
+import sys
+import uuid
+from pathlib import Path
+
+# `core/`, `agents/` and `tools/` live at the project root, one level above
+# this file. Streamlit only puts this file's own directory on sys.path, so
+# the root must be added explicitly for these absolute imports to resolve
+# regardless of the working directory the app is launched from.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage

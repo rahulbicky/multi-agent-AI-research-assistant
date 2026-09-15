@@ -55,7 +55,7 @@ Instead of a single LLM that guesses at everything, this system uses a **Supervi
 
 ```mermaid
 graph TD
-    U(["👤 User"]):::user --> ST["🖥️ Streamlit UI\nstreamlit_app.py"]
+    U(["👤 User"]):::user --> ST["🖥️ Streamlit UI\nfrontend/app.py"]
     ST --> LG["🔀 LangGraph\nStateGraph"]
 
     LG --> SV["🎯 Supervisor Agent\nLLM-based Router\ntemp=0, deterministic"]
@@ -231,13 +231,15 @@ SQLite Database: chatbot.db
 ## 📁 Project Structure
 
 ```text
-Conversational-AI-Agent/
+multi-agent-AI-research-assistant/
 │
-├── streamlit_app.py              ← 🚀 Main entry point (run this)
+├── frontend/
+│   └── app.py                    ← 🚀 Main entry point (run this)
 │
 ├── core/                         ← Shared infrastructure
 │   ├── config.py                 ← Centralised Settings dataclass + env vars
 │   ├── state.py                  ← AgentState TypedDict (shared graph state)
+│   ├── context.py                ← Chat-history windowing helpers
 │   ├── memory.py                 ← SQLite checkpointer + user isolation
 │   └── graph.py                  ← Multi-agent LangGraph assembly
 │
@@ -249,24 +251,10 @@ Conversational-AI-Agent/
 │   └── coding_agent.py           ← Code generation, debug, review
 │
 ├── tools/                        ← Tool definitions
-│   ├── tools.py                  ← calculator · stock · web search · rag_tool
+│   ├── tools.py                  ← calculator · stock · web search · rag_tool · PDF ingestion
 │   └── mcp_tools.py              ← MCP loader (graceful failure)
 │
-├── ── Original Reference Backends (preserved) ──────────────────
-├── langgraph_backend.py          ← Basic Groq + LangGraph
-├── langgraph_tool_backend.py     ← Tools: calculator, search, stock
-├── langgraph_database_backend.py ← SQLite checkpoint example
-├── langgraph_mcp_backend.py      ← MCP integration (original)
-├── langraph_rag_backend.py       ← PDF RAG (original, single-agent)
-│
-├── ── Original Frontends (preserved) ───────────────────────────
-├── streamlit_frontend.py
-├── streamlit_frontend_streaming.py
-├── streamlit_frontend_threading.py
-├── streamlit_frontend_database.py
-├── streamlit_frontend_mcp.py
-├── streamlit_rag_frontend.py
-│
+├── run.py                        ← Optional launcher: `python run.py`
 ├── Dockerfile                    ← Container build
 ├── docker-compose.yml            ← Local container orchestration
 ├── requirements.txt              ← All Python dependencies
@@ -274,6 +262,8 @@ Conversational-AI-Agent/
 ├── .streamlit/config.toml        ← Streamlit server config
 └── LICENSE
 ```
+
+> **Note:** Earlier single-file prototypes (`streamlit_frontend*.py`, `langgraph_*_backend.py`) that this project evolved from have been removed — every feature they demonstrated (streaming, threading, SQLite persistence, MCP, PDF RAG) is fully implemented, with user isolation and multi-agent routing on top, in `frontend/app.py` + `core/`/`agents/`/`tools/` above.
 
 ---
 
@@ -345,7 +335,9 @@ GROQ_API_KEY=gsk_your_key_here
 ### 4 — Run the application
 
 ```bash
-streamlit run streamlit_app.py
+streamlit run frontend/app.py
+# or, equivalently
+python run.py
 ```
 
 Open **`http://localhost:8501`** in your browser. 🎉

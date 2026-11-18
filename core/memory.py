@@ -260,6 +260,12 @@ def delete_thread(user_id: str, thread_id: str) -> bool:
                 (composite,),
             )
 
+            # Remove any message feedback
+            conn.execute(
+                "DELETE FROM message_feedback WHERE composite_thread_id = ?",
+                (composite,),
+            )
+
         if deleted_checkpoints == 0:
             logger.warning(
                 "delete_thread: no checkpoints found for %s — may already be deleted",
@@ -361,6 +367,53 @@ def set_user_setting(user_id: str, key: str, value: str) -> None:
         (composite, str(value)),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Message Feedback (Thumbs Up / Down)
+# ---------------------------------------------------------------------------
+
+def _ensure_feedback_table(conn: sqlite3.Connection) -> None:
+    """Create message_feedback table if it does not exist."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_feedback (
+            composite_thread_id TEXT,
+            message_index       INTEGER,
+            feedback            TEXT NOT NULL,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (composite_thread_id, message_index)
+        )
+        """
+    )
+    conn.commit()
+
+
+def save_message_feedback(user_id: str, thread_id: str, message_index: int, feedback: str) -> None:
+    """Save user thumbs up / down feedback for an assistant response."""
+    conn = _get_connection()
+    _ensure_feedback_table(conn)
+    composite = f"{user_id}:{thread_id}"
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO message_feedback (composite_thread_id, message_index, feedback)
+        VALUES (?, ?, ?)
+        """,
+        (composite, message_index, feedback),
+    )
+    conn.commit()
+
+
+def get_message_feedback(user_id: str, thread_id: str, message_index: int) -> str | None:
+    """Retrieve saved feedback ('like' | 'dislike') for a message, or None."""
+    conn = _get_connection()
+    _ensure_feedback_table(conn)
+    composite = f"{user_id}:{thread_id}"
+    row = conn.execute(
+        "SELECT feedback FROM message_feedback WHERE composite_thread_id = ? AND message_index = ?",
+        (composite, message_index),
+    ).fetchone()
+    return row[0] if row else None
 
 
 # ---------------------------------------------------------------------------

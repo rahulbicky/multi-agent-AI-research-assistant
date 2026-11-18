@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -45,6 +46,8 @@ from core.memory import (
     set_user_setting,
     rewind_for_regeneration,
     rewind_for_edit,
+    save_message_feedback,
+    get_message_feedback,
 )
 from core.graph import chatbot
 from tools.tools import (
@@ -127,6 +130,7 @@ def _init_session():
         "_edit_msg_content",
         "_trigger_regen",
         "_trigger_edit",
+        "_trigger_card_prompt",
         "_stop_generation",
     ):
         if _key not in st.session_state:
@@ -147,31 +151,77 @@ current_theme = st.session_state.get("theme", "dark")
 
 def get_theme_css(theme: str) -> str:
     is_dark = (theme == "dark")
-    bg_main = "#0f0f13" if is_dark else "#f8fafc"
-    bg_sidebar = "linear-gradient(180deg, #16161e 0%, #1a1a24 100%)" if is_dark else "linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%)"
-    border_color = "#2a2a3a" if is_dark else "#e2e8f0"
-    text_main = "#e8e8f0" if is_dark else "#0f172a"
-    text_muted = "#6b7280" if is_dark else "#64748b"
-    card_bg = "#1c1c28" if is_dark else "#ffffff"
-    card_hover = "#1e1e2e" if is_dark else "#f1f5f9"
-    user_bubble = "rgba(99, 102, 241, 0.08)" if is_dark else "#eef2ff"
-    user_border = "rgba(99, 102, 241, 0.2)" if is_dark else "#c7d2fe"
-    chat_input_bg = "#1c1c28" if is_dark else "#ffffff"
-    chat_input_border = "#3a3a50" if is_dark else "#cbd5e1"
-    btn_text = "#c0c0d0" if is_dark else "#334155"
-    btn_action = "#4b5563" if is_dark else "#64748b"
+
+    # ── Orange + Coral + Peach colour tokens ───────────────────────────────
+    # Primary palette (always orange/coral regardless of theme)
+    primary       = "#FF6B35"
+    primary_coral = "#FF8066"
+    accent        = "#FFAA70"
+    peach_light   = "#FFF0E6"
+
+    # Theme-dependent surfaces
+    if is_dark:
+        bg_main          = "#17131A"
+        bg_sidebar       = "linear-gradient(180deg, #1E1820 0%, #17131A 100%)"
+        bg_sidebar_solid = "#1E1820"
+        border_color     = "#2E2530"
+        text_main        = "#F5EEE8"
+        text_muted       = "#9E8E84"
+        card_bg          = "#221C26"
+        card_bg_alt      = "#251F29"
+        card_hover       = "#2A2030"
+        user_bubble      = "rgba(255,107,53,0.08)"
+        user_border      = "rgba(255,107,53,0.25)"
+        chat_input_bg    = "#221C26"
+        chat_input_border= "#3A2F38"
+        btn_text         = "#C8B8B0"
+        btn_action       = "#7A6870"
+        code_bg          = "#1A1420"
+        shadow_primary   = "rgba(255,107,53,0.30)"
+        shadow_card      = "rgba(0,0,0,0.35)"
+        scrollbar_thumb  = "#3D3040"
+        active_conv_bg   = "rgba(255,107,53,0.12)"
+        active_conv_border= "rgba(255,107,53,0.35)"
+    else:
+        bg_main          = "#FFF8F3"
+        bg_sidebar       = "linear-gradient(180deg, #FFFFFF 0%, #FFF5EE 100%)"
+        bg_sidebar_solid = "#FFFFFF"
+        border_color     = "#F0E0D6"
+        text_main        = "#24202A"
+        text_muted       = "#8A7570"
+        card_bg          = "#FFFFFF"
+        card_bg_alt      = "#FFF5EE"
+        card_hover       = "#FFF0E6"
+        user_bubble      = "#FFF0E6"
+        user_border      = "#FFCBA8"
+        chat_input_bg    = "#FFFFFF"
+        chat_input_border= "#F0D8C8"
+        btn_text         = "#5A4040"
+        btn_action       = "#9A8070"
+        code_bg          = "#FFF5EE"
+        shadow_primary   = "rgba(255,107,53,0.20)"
+        shadow_card      = "rgba(255,107,53,0.08)"
+        scrollbar_thumb  = "#F0C8B0"
+        active_conv_bg   = "#FFF0E6"
+        active_conv_border= "#FF8066"
 
     return f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    *, *::before, *::after {{ box-sizing: border-box; }}
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
-        font-family: 'Inter', sans-serif !important;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+    /* ── Reset & Base ─────────────────────────────────────────────────── */
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; }}
+    html, body,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"] {{
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
         background-color: {bg_main} !important;
         color: {text_main} !important;
     }}
     #MainMenu, footer, header {{ visibility: hidden; }}
-    [data-testid="stToolbar"] {{ display: none; }}
+    [data-testid="stToolbar"] {{ display: none !important; }}
+
+    /* ── Sidebar ─────────────────────────────────────────────────────── */
     [data-testid="stSidebar"] {{
         background: {bg_sidebar} !important;
         border-right: 1px solid {border_color} !important;
@@ -179,167 +229,83 @@ def get_theme_css(theme: str) -> str:
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {{
         color: {text_main} !important;
     }}
+    /* Default sidebar buttons — thread list */
     [data-testid="stSidebar"] .stButton > button {{
         width: 100%;
         text-align: left;
         background: transparent;
         border: 1px solid transparent;
         color: {btn_text};
-        border-radius: 8px;
+        border-radius: 10px;
         padding: 8px 12px;
         font-size: 13px;
-        transition: all 0.15s ease;
+        font-weight: 400;
+        transition: all 0.18s ease;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }}
     [data-testid="stSidebar"] .stButton > button:hover {{
-        background: rgba(99, 102, 241, 0.15) !important;
-        border-color: rgba(99, 102, 241, 0.4) !important;
-        color: #a5b4fc !important;
+        background: {active_conv_bg} !important;
+        border-color: {active_conv_border} !important;
+        color: {primary} !important;
     }}
+
+    /* ── New Chat button ─────────────────────────────────────────────── */
     .new-chat-btn > button {{
-        background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
-        color: white !important;
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
+        color: #FFFFFF !important;
         border: none !important;
-        border-radius: 10px !important;
-        font-weight: 600 !important;
+        border-radius: 12px !important;
+        font-weight: 700 !important;
         font-size: 14px !important;
-        padding: 10px 16px !important;
-        transition: all 0.2s ease !important;
-        box-shadow: 0 4px 15px rgba(99,102,241,0.3) !important;
+        padding: 11px 18px !important;
+        transition: all 0.22s ease !important;
+        box-shadow: 0 4px 18px {shadow_primary} !important;
+        letter-spacing: 0.3px !important;
     }}
     .new-chat-btn > button:hover {{
-        transform: translateY(-1px) !important;
-        box-shadow: 0 6px 20px rgba(99,102,241,0.45) !important;
+        transform: translateY(-2px) !important;
+        box-shadow: 0 8px 28px {shadow_primary} !important;
+        filter: brightness(1.06) !important;
     }}
-    [data-testid="stMain"], .main .block-container {{
-        background: {bg_main} !important;
-        padding-top: 20px !important;
-        max-width: 900px !important;
-        margin: 0 auto !important;
+    .new-chat-btn > button:active {{
+        transform: translateY(0) !important;
+        filter: brightness(0.97) !important;
     }}
-    [data-testid="stChatMessage"] {{
-        background: transparent !important;
+
+    /* ── Theme toggle buttons ─────────────────────────────────────────── */
+    .theme-btn-active > button {{
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
+        color: #FFFFFF !important;
         border: none !important;
-        padding: 6px 0 !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        font-size: 12px !important;
+        box-shadow: 0 2px 10px {shadow_primary} !important;
     }}
-    [data-testid="stChatMessage"][data-testid*="user"],
-    .stChatMessage.user {{
-        background: {user_bubble} !important;
-        border: 1px solid {user_border} !important;
-        border-radius: 16px !important;
-        padding: 16px !important;
-        color: {text_main} !important;
-    }}
-    [data-testid="stChatInput"] {{
-        background: {chat_input_bg} !important;
-        border: 1px solid {chat_input_border} !important;
-        border-radius: 14px !important;
-        color: {text_main} !important;
-    }}
-    [data-testid="stChatInput"]:focus-within {{
-        border-color: #6366f1 !important;
-        box-shadow: 0 0 0 3px rgba(99,102,241,0.15) !important;
-    }}
-    [data-testid="stChatInput"] textarea {{
+    .theme-btn-inactive > button {{
         background: transparent !important;
-        color: {text_main} !important;
-    }}
-    .agent-badge {{
-        display: inline-block;
-        padding: 2px 10px;
-        border-radius: 20px;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-        margin-bottom: 6px;
-        text-transform: uppercase;
-    }}
-    .badge-general   {{ background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }}
-    .badge-research  {{ background: rgba(59,130,246,0.15); color: #3b82f6; border: 1px solid rgba(59,130,246,0.3); }}
-    .badge-rag       {{ background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }}
-    .badge-coding    {{ background: rgba(168,85,247,0.15); color: #a855f7; border: 1px solid rgba(168,85,247,0.3); }}
-    .hero-header {{
-        text-align: center;
-        padding: 40px 20px 24px;
-    }}
-    .hero-title {{
-        font-size: 2.8rem;
-        font-weight: 700;
-        background: linear-gradient(135deg, #6366f1 0%, #a78bfa 50%, #38bdf8 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        line-height: 1.2;
-        margin-bottom: 12px;
-    }}
-    .hero-subtitle {{
-        font-size: 1.05rem;
-        color: {text_muted};
-        font-weight: 400;
-    }}
-    .capability-grid {{
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 12px;
-        margin: 24px 0;
-    }}
-    .capability-card {{
-        background: {card_bg};
-        border: 1px solid {border_color};
-        border-radius: 14px;
-        padding: 18px;
-        transition: all 0.2s ease;
-        cursor: default;
-    }}
-    .capability-card:hover {{
-        border-color: #6366f1;
-        background: {card_hover};
-        transform: translateY(-2px);
-    }}
-    .capability-icon {{ font-size: 1.5rem; margin-bottom: 8px; }}
-    .capability-title {{
-        font-size: 0.95rem;
-        font-weight: 600;
-        color: {text_main};
-        margin-bottom: 4px;
-    }}
-    .capability-desc {{ font-size: 0.82rem; color: {text_muted}; }}
-    .sidebar-section {{
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        color: {btn_action};
-        padding: 8px 4px 4px;
-        margin-top: 8px;
-    }}
-    [data-testid="stStatus"] {{
-        background: {card_bg} !important;
+        color: {btn_action} !important;
         border: 1px solid {border_color} !important;
-        border-radius: 10px !important;
+        border-radius: 8px !important;
+        font-size: 12px !important;
     }}
-    ::-webkit-scrollbar {{ width: 6px; }}
-    ::-webkit-scrollbar-track {{ background: transparent; }}
-    ::-webkit-scrollbar-thumb {{ background: {border_color}; border-radius: 3px; }}
-    [data-testid="stFileUploader"] {{
-        background: {card_bg} !important;
-        border: 1px dashed {border_color} !important;
-        border-radius: 10px !important;
+    .theme-btn-inactive > button:hover {{
+        border-color: {primary} !important;
+        color: {primary} !important;
+        background: {user_bubble} !important;
     }}
-    hr {{ border-color: {border_color} !important; }}
-    [data-testid="stExpander"] {{
-        background: {card_bg} !important;
-        border: 1px solid {border_color} !important;
-        border-radius: 10px !important;
+
+    /* ── Active conversation item ─────────────────────────────────────── */
+    .conv-active > button {{
+        background: {active_conv_bg} !important;
+        border-color: {active_conv_border} !important;
+        color: {primary} !important;
+        font-weight: 600 !important;
     }}
-    @media (max-width: 640px) {{
-        .capability-grid {{ grid-template-columns: 1fr; }}
-        .hero-title {{ font-size: 2rem; }}
-        .hero-header {{ padding: 32px 12px 24px; }}
-        [data-testid="stMain"], .main .block-container {{ padding-left: 8px !important; padding-right: 8px !important; }}
-    }}
+
+    /* ── Conversation rename / delete icon buttons ───────────────────── */
     .conv-action-btn > button {{
         background: transparent !important;
         border: none !important;
@@ -349,36 +315,363 @@ def get_theme_css(theme: str) -> str:
         min-height: 0 !important;
         line-height: 1 !important;
         width: auto !important;
+        border-radius: 4px !important;
+        transition: all 0.15s ease !important;
     }}
     .conv-action-btn > button:hover {{
-        color: #a78bfa !important;
-        background: rgba(99,102,241,0.1) !important;
-        border-radius: 4px !important;
+        color: {primary} !important;
+        background: {user_bubble} !important;
     }}
     .conv-delete-btn > button:hover {{
-        color: #f87171 !important;
-        background: rgba(239,68,68,0.1) !important;
+        color: #EF4444 !important;
+        background: rgba(239,68,68,0.10) !important;
     }}
-    .msg-toolbar {{
-        display: flex;
-        gap: 8px;
-        margin-top: 6px;
+
+    /* ── Sidebar section labels ───────────────────────────────────────── */
+    .sidebar-section {{
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1.4px;
+        color: {btn_action};
+        padding: 10px 4px 5px;
+        margin-top: 4px;
+    }}
+
+    /* ── Main content area ───────────────────────────────────────────── */
+    [data-testid="stMain"], .main .block-container {{
+        background: {bg_main} !important;
+        padding-top: 24px !important;
+        max-width: 920px !important;
+        margin: 0 auto !important;
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+    }}
+
+    /* ── Hero / Welcome screen ───────────────────────────────────────── */
+    .hero-header {{
+        text-align: center;
+        padding: 48px 20px 28px;
+    }}
+    .hero-logo-ring {{
+        display: inline-flex;
         align-items: center;
+        justify-content: center;
+        width: 72px;
+        height: 72px;
+        border-radius: 20px;
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%);
+        box-shadow: 0 8px 32px {shadow_primary};
+        font-size: 2rem;
+        margin-bottom: 20px;
     }}
+    .hero-title {{
+        font-size: 2.9rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 55%, {accent} 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        line-height: 1.18;
+        margin-bottom: 14px;
+        letter-spacing: -0.5px;
+    }}
+    .hero-subtitle {{
+        font-size: 1.05rem;
+        color: {text_muted};
+        font-weight: 400;
+        line-height: 1.6;
+        max-width: 540px;
+        margin: 0 auto;
+    }}
+
+    /* ── Capability / suggestion cards ───────────────────────────────── */
+    .capability-grid {{
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 14px;
+        margin: 28px 0 8px;
+    }}
+    .capability-card {{
+        background: {card_bg};
+        border: 1px solid {border_color};
+        border-radius: 16px;
+        padding: 20px;
+        transition: all 0.22s ease;
+        cursor: pointer;
+        position: relative;
+        overflow: hidden;
+    }}
+    .capability-card::before {{
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, {primary}, {primary_coral});
+        opacity: 0;
+        transition: opacity 0.22s ease;
+        border-radius: 16px 16px 0 0;
+    }}
+    .capability-card:hover {{
+        border-color: {primary_coral};
+        background: {card_hover};
+        transform: translateY(-3px);
+        box-shadow: 0 10px 32px {shadow_card};
+    }}
+    .capability-card:hover::before {{ opacity: 1; }}
+    .capability-icon {{
+        font-size: 1.7rem;
+        margin-bottom: 10px;
+        display: block;
+    }}
+    .capability-title {{
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: {text_main};
+        margin-bottom: 5px;
+    }}
+    .capability-desc {{ font-size: 0.82rem; color: {text_muted}; line-height: 1.5; }}
+
+    /* ── Interactive Suggestion Cards ───────────────────────────────── */
+    .card-btn > button {{
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 16px !important;
+        padding: 18px 20px !important;
+        text-align: left !important;
+        color: {text_main} !important;
+        transition: all 0.22s ease !important;
+        width: 100% !important;
+        min-height: 96px !important;
+        box-shadow: 0 2px 10px {shadow_card} !important;
+        position: relative !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: flex-start !important;
+        white-space: pre-wrap !important;
+        line-height: 1.45 !important;
+    }}
+    .card-btn > button:hover {{
+        border-color: {primary} !important;
+        background: {card_hover} !important;
+        transform: translateY(-3px) !important;
+        box-shadow: 0 10px 28px {shadow_primary} !important;
+        color: {text_main} !important;
+    }}
+    .card-btn > button:active {{
+        transform: translateY(0) !important;
+    }}
+
+    /* ── Chat messages ───────────────────────────────────────────────── */
+    [data-testid="stChatMessage"] {{
+        background: transparent !important;
+        border: none !important;
+        padding: 6px 0 !important;
+    }}
+    /* Assistant message bubble — clean card surface */
+    [data-testid="stChatMessage"]:not(:has([data-testid="stChatMessageAvatar"])) {{
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 16px !important;
+        padding: 16px !important;
+        box-shadow: 0 2px 8px {shadow_card} !important;
+    }}
+    /* User message bubble — warm peach/orange tint */
+    .stChatMessage.user,
+    [data-testid="stChatMessage"][class*="user"],
+    [data-testid="stChatMessage"][data-testid*="user"] {{
+        background: {user_bubble} !important;
+        border: 1px solid {user_border} !important;
+        border-radius: 16px !important;
+        padding: 16px !important;
+        color: {text_main} !important;
+        box-shadow: 0 2px 8px {shadow_card} !important;
+    }}
+
+    /* ── Code blocks & syntax highlighting ───────────────────────────── */
+    code {{
+        font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
+        background: {code_bg} !important;
+        color: {primary} !important;
+        padding: 2px 6px !important;
+        border-radius: 6px !important;
+        font-size: 0.88em !important;
+        border: 1px solid {border_color} !important;
+    }}
+    pre {{
+        background: {code_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 12px !important;
+        padding: 14px 18px !important;
+        overflow-x: auto !important;
+    }}
+    pre code {{
+        background: transparent !important;
+        color: {text_main} !important;
+        padding: 0 !important;
+        border: none !important;
+    }}
+
+    /* ── Message action toolbar ──────────────────────────────────────── */
     .msg-action-btn > button {{
         background: transparent !important;
         border: 1px solid {border_color} !important;
         color: {btn_action} !important;
-        padding: 2px 8px !important;
+        padding: 3px 10px !important;
         font-size: 11px !important;
-        border-radius: 6px !important;
+        border-radius: 7px !important;
         min-height: 0 !important;
-        line-height: 1.2 !important;
+        line-height: 1.4 !important;
+        transition: all 0.15s ease !important;
+        font-weight: 500 !important;
     }}
     .msg-action-btn > button:hover {{
-        color: #a78bfa !important;
-        border-color: #6366f1 !important;
-        background: rgba(99,102,241,0.1) !important;
+        color: {primary} !important;
+        border-color: {primary} !important;
+        background: {user_bubble} !important;
+    }}
+    .msg-feedback-active > button {{
+        background: {user_bubble} !important;
+        border: 1px solid {primary} !important;
+        color: {primary} !important;
+        padding: 3px 10px !important;
+        font-size: 11px !important;
+        border-radius: 7px !important;
+        min-height: 0 !important;
+        line-height: 1.4 !important;
+        font-weight: 600 !important;
+        box-shadow: 0 2px 8px {shadow_primary} !important;
+    }}
+    .msg-toolbar {{
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+    }}
+
+    /* ── Agent badges ───────────────────────────────────────────────── */
+    .agent-badge {{
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.6px;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+    }}
+    .badge-general  {{ background: rgba(16,185,129,0.12); color: #10b981; border: 1px solid rgba(16,185,129,0.28); }}
+    .badge-research {{ background: rgba(59,130,246,0.12); color: #3b82f6; border: 1px solid rgba(59,130,246,0.28); }}
+    .badge-rag      {{ background: rgba(255,107,53,0.12); color: {primary}; border: 1px solid rgba(255,107,53,0.28); }}
+    .badge-coding   {{ background: rgba(168,85,247,0.12); color: #a855f7; border: 1px solid rgba(168,85,247,0.28); }}
+
+    /* ── Chat input box ─────────────────────────────────────────────── */
+    [data-testid="stChatInput"] {{
+        background: {chat_input_bg} !important;
+        border: 1.5px solid {chat_input_border} !important;
+        border-radius: 16px !important;
+        color: {text_main} !important;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+    }}
+    [data-testid="stChatInput"]:focus-within {{
+        border-color: {primary} !important;
+        box-shadow: 0 0 0 3px rgba(255,107,53,0.14) !important;
+    }}
+    [data-testid="stChatInput"] textarea {{
+        background: transparent !important;
+        color: {text_main} !important;
+    }}
+    [data-testid="stChatInput"] button {{
+        background: linear-gradient(135deg, {primary}, {primary_coral}) !important;
+        border-radius: 10px !important;
+        color: white !important;
+        border: none !important;
+    }}
+
+    /* ── Status / tool indicator ─────────────────────────────────────── */
+    [data-testid="stStatus"] {{
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 12px !important;
+    }}
+    [data-testid="stStatus"] [data-testid="stStatusLabel"] {{
+        color: {text_main} !important;
+    }}
+
+    /* ── Expander (Sources panel) ────────────────────────────────────── */
+    [data-testid="stExpander"] {{
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 12px !important;
+    }}
+    [data-testid="stExpander"] summary {{
+        color: {text_main} !important;
+    }}
+
+    /* ── File uploader ───────────────────────────────────────────────── */
+    [data-testid="stFileUploader"] {{
+        background: {card_bg} !important;
+        border: 1.5px dashed {user_border} !important;
+        border-radius: 12px !important;
+    }}
+    [data-testid="stFileUploader"]:hover {{
+        border-color: {primary} !important;
+    }}
+
+    /* ── Dividers & scrollbars ────────────────────────────────────────── */
+    hr {{ border-color: {border_color} !important; }}
+    ::-webkit-scrollbar {{ width: 5px; height: 5px; }}
+    ::-webkit-scrollbar-track {{ background: transparent; }}
+    ::-webkit-scrollbar-thumb {{
+        background: {scrollbar_thumb};
+        border-radius: 4px;
+    }}
+    ::-webkit-scrollbar-thumb:hover {{ background: {primary}; }}
+
+    /* ── Download buttons ─────────────────────────────────────────────── */
+    [data-testid="stDownloadButton"] > button {{
+        background: {card_bg_alt} !important;
+        border: 1px solid {border_color} !important;
+        color: {text_main} !important;
+        border-radius: 8px !important;
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        transition: all 0.15s ease !important;
+    }}
+    [data-testid="stDownloadButton"] > button:hover {{
+        border-color: {primary} !important;
+        color: {primary} !important;
+        background: {user_bubble} !important;
+    }}
+
+    /* ── Caption & small text ─────────────────────────────────────────── */
+    .stCaption {{ color: {text_muted} !important; font-size: 11.5px !important; }}
+
+    /* ── Toast notifications ─────────────────────────────────────────── */
+    [data-testid="stToast"] {{
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 12px !important;
+        color: {text_main} !important;
+    }}
+
+    /* ── Responsive ───────────────────────────────────────────────────── */
+    @media (max-width: 768px) {{
+        .capability-grid {{ grid-template-columns: 1fr; gap: 10px; }}
+        .hero-title {{ font-size: 2.1rem; }}
+        .hero-header {{ padding: 32px 12px 20px; }}
+        [data-testid="stMain"], .main .block-container {{
+            padding-left: 10px !important;
+            padding-right: 10px !important;
+        }}
+    }}
+    @media (max-width: 480px) {{
+        .hero-title {{ font-size: 1.7rem; }}
+        .hero-logo-ring {{ width: 56px; height: 56px; font-size: 1.5rem; }}
+        .capability-card {{ padding: 14px; }}
     }}
     </style>
     """
@@ -567,11 +860,21 @@ def _edit_dialog():
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    # Logo / title
+    # ── Logo / Branding ──
     st.markdown("""
-    <div style="padding: 12px 4px 10px;">
-        <div style="font-size:1.4rem; font-weight:700; color:#a78bfa;">🤖 AI Assistant</div>
-        <div style="font-size:11px; color:#4b5563; margin-top:2px;">Multi-Agent Research System</div>
+    <div style="padding: 16px 4px 12px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+            <div style="
+                width:40px; height:40px; border-radius:12px;
+                background: linear-gradient(135deg, #FF6B35, #FF8066);
+                display:flex; align-items:center; justify-content:center;
+                font-size:1.2rem; box-shadow: 0 4px 14px rgba(255,107,53,0.35);
+                flex-shrink:0;">🤖</div>
+            <div>
+                <div style="font-size:1.1rem; font-weight:800; background: linear-gradient(135deg, #FF6B35, #FF8066); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; letter-spacing:-0.3px;">AI Assistant</div>
+                <div style="font-size:10px; color:#9E8E84; margin-top:1px; font-weight:500; letter-spacing:0.5px; text-transform:uppercase;">Multi-Agent Research</div>
+            </div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -579,28 +882,32 @@ with st.sidebar:
     col_th1, col_th2 = st.columns(2)
     with col_th1:
         dark_active = (current_theme == "dark")
+        dark_cls = "theme-btn-active" if dark_active else "theme-btn-inactive"
+        st.markdown(f'<div class="{dark_cls}">', unsafe_allow_html=True)
         if st.button(
             "🌙 Dark",
             use_container_width=True,
             key="theme_dark_btn",
-            type="primary" if dark_active else "secondary",
         ):
             if not dark_active:
                 st.session_state["theme"] = "dark"
                 set_user_setting(user_id, "theme", "dark")
                 st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
     with col_th2:
         light_active = (current_theme == "light")
+        light_cls = "theme-btn-active" if light_active else "theme-btn-inactive"
+        st.markdown(f'<div class="{light_cls}">', unsafe_allow_html=True)
         if st.button(
             "☀️ Light",
             use_container_width=True,
             key="theme_light_btn",
-            type="primary" if light_active else "secondary",
         ):
             if not light_active:
                 st.session_state["theme"] = "light"
                 set_user_setting(user_id, "theme", "light")
                 st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── New Chat ──
     st.markdown('<div class="new-chat-btn" style="margin-top:10px;">', unsafe_allow_html=True)
@@ -714,10 +1021,13 @@ with st.sidebar:
 
         col_title, col_rename, col_delete = st.columns([6, 1, 1])
         with col_title:
+            active_cls = "conv-active" if is_active else ""
+            st.markdown(f'<div class="{active_cls}">', unsafe_allow_html=True)
             if st.button(display_title, key=f"thread_btn_{tid}", use_container_width=True):
                 if not is_active:
                     switch_thread(tid)
                     st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
         with col_rename:
             st.markdown('<div class="conv-action-btn">', unsafe_allow_html=True)
             if st.button("✏️", key=f"rename_btn_{tid}", help="Rename conversation"):
@@ -775,11 +1085,16 @@ with st.sidebar:
     from tools.mcp_tools import load_mcp_tools
     mcp = load_mcp_tools()
     if mcp:
-        st.caption(f"MCP tools: {len(mcp)} loaded")
+        st.caption(f"MCP tools: {len(mcp)} loaded ✅")
     else:
-        st.caption("MCP: not connected")
+        st.caption("MCP: not connected ⚠️")
 
     st.caption(f"Session: `{user_id[-8:]}`")
+    st.markdown("""
+    <div style="padding: 10px 4px 4px; font-size:10px; color:#9E8E84; text-align:center;">
+        🟠 Multi-Agent AI Research Assistant
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -796,32 +1111,65 @@ message_history = st.session_state["message_history"]
 if not message_history:
     st.markdown("""
     <div class="hero-header">
+        <div class="hero-logo-ring">🤖</div>
         <div class="hero-title">AI Research Assistant</div>
-        <div class="hero-subtitle">Powered by Multi-Agent Intelligence · Groq · LangGraph</div>
-    </div>
-    <div class="capability-grid">
-        <div class="capability-card">
-            <div class="capability-icon">🔍</div>
-            <div class="capability-title">Web Research</div>
-            <div class="capability-desc">Search the web, get stock prices, find current news and data</div>
-        </div>
-        <div class="capability-card">
-            <div class="capability-icon">📄</div>
-            <div class="capability-title">Document Q&A</div>
-            <div class="capability-desc">Upload a PDF and ask detailed questions about its contents</div>
-        </div>
-        <div class="capability-card">
-            <div class="capability-icon">💻</div>
-            <div class="capability-title">Coding Assistant</div>
-            <div class="capability-desc">Generate, debug, review and explain code in any language</div>
-        </div>
-        <div class="capability-card">
-            <div class="capability-icon">💬</div>
-            <div class="capability-title">General Chat</div>
-            <div class="capability-desc">Ask anything — the right agent is selected automatically</div>
+        <div class="hero-subtitle">
+            Powered by Multi-Agent Intelligence · Groq · LangGraph<br>
+            Select a starter prompt below or ask any question to get started.
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    c_col1, c_col2 = st.columns(2)
+    with c_col1:
+        st.markdown('<div class="card-btn">', unsafe_allow_html=True)
+        if st.button(
+            "🔍  **Web Research**\n\nSearch live web, news, stock quotes & current data in real time",
+            key="card_btn_research",
+            use_container_width=True,
+        ):
+            st.session_state["_trigger_card_prompt"] = "Search the web for the latest breakthroughs in multi-agent AI systems and summarize key trends."
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card-btn" style="margin-top:12px;">', unsafe_allow_html=True)
+        if st.button(
+            "💻  **Coding Assistant**\n\nGenerate, debug, review and explain code in any language",
+            key="card_btn_coding",
+            use_container_width=True,
+        ):
+            st.session_state["_trigger_card_prompt"] = "Write a Python script for an asynchronous task queue with retry logic and error handling."
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with c_col2:
+        st.markdown('<div class="card-btn">', unsafe_allow_html=True)
+        doc_card_label = (
+            "📄  **Document Q&A**\n\nAsk questions about your uploaded documents"
+            if current_docs
+            else "📄  **Document Q&A**\n\nUpload a PDF, DOCX, TXT or MD in sidebar to ask questions"
+        )
+        if st.button(
+            doc_card_label,
+            key="card_btn_doc_qa",
+            use_container_width=True,
+        ):
+            if current_docs:
+                st.session_state["_trigger_card_prompt"] = "Summarize the key topics and findings across my uploaded documents."
+            else:
+                st.session_state["_trigger_card_prompt"] = "How does multi-document RAG work and what file types can I upload?"
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="card-btn" style="margin-top:12px;">', unsafe_allow_html=True)
+        if st.button(
+            "💬  **General Chat**\n\nAsk anything — from timeless knowledge to creative reasoning",
+            key="card_btn_general",
+            use_container_width=True,
+        ):
+            st.session_state["_trigger_card_prompt"] = "Explain how multi-agent LLM systems with a supervisor agent compare to single-prompt models."
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Handle interrupted / stopped generation from previous run ──
 if st.session_state.get("_is_generating"):
@@ -867,7 +1215,11 @@ for idx, msg in enumerate(message_history):
 
         elif role == "assistant":
             is_last = (idx == last_assistant_idx)
-            col_c1, col_c2, _ = st.columns([0.15, 0.22, 0.63])
+            feedback_val = get_message_feedback(user_id, thread_id, idx)
+            like_cls = "msg-feedback-active" if feedback_val == "like" else "msg-action-btn"
+            dislike_cls = "msg-feedback-active" if feedback_val == "dislike" else "msg-action-btn"
+
+            col_c1, col_c2, col_f1, col_f2, _ = st.columns([0.16, 0.22, 0.11, 0.11, 0.40])
             with col_c1:
                 st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
                 if st.button("📋 Copy", key=f"copy_btn_{idx}", help="Copy response to clipboard"):
@@ -891,16 +1243,42 @@ for idx, msg in enumerate(message_history):
                 else:
                     st.button("🔄 Regenerate", key=f"regen_btn_{idx}", disabled=True, help="Only the most recent response can be regenerated")
                 st.markdown('</div>', unsafe_allow_html=True)
+            with col_f1:
+                st.markdown(f'<div class="{like_cls}">', unsafe_allow_html=True)
+                if st.button("👍", key=f"like_btn_{idx}", help="Helpful response"):
+                    save_message_feedback(user_id, thread_id, idx, "like")
+                    st.toast("Thank you for your feedback! 👍")
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+            with col_f2:
+                st.markdown(f'<div class="{dislike_cls}">', unsafe_allow_html=True)
+                if st.button("👎", key=f"dislike_btn_{idx}", help="Needs improvement"):
+                    save_message_feedback(user_id, thread_id, idx, "dislike")
+                    st.toast("Feedback recorded. We'll improve! 👎")
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Chat input + response
 # ─────────────────────────────────────────────────────────────────────────────
 
-user_input = st.chat_input("Ask anything — research, documents, code, or general questions…")
+# Attachment / Document Context Indicator
+if current_docs:
+    doc_names = ", ".join(f"`{d.get('filename')}`" for d in current_docs[:3])
+    extra = f" +{len(current_docs) - 3} more" if len(current_docs) > 3 else ""
+    st.markdown(
+        f'<div style="font-size:11.5px; color:#FF8066; margin-bottom:6px; display:flex; align-items:center; gap:6px;">'
+        f'<span>📎</span> <span><b>{len(current_docs)} document(s) active:</b> {doc_names}{extra}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+user_input = st.chat_input("Ask anything about research, documents, code, or general questions...")
 
 trigger_regen = st.session_state.pop("_trigger_regen", None)
 trigger_edit = st.session_state.pop("_trigger_edit", None)
+trigger_card = st.session_state.pop("_trigger_card_prompt", None)
 
 prompt_to_stream = None
 is_regeneration = False
@@ -914,11 +1292,35 @@ elif trigger_edit:
     message_history.append({"role": "user", "content": prompt_to_stream, "agent_name": None})
     with st.chat_message("user"):
         st.markdown(prompt_to_stream)
+elif trigger_card:
+    prompt_to_stream = trigger_card
+    is_regeneration = False
+    if not message_history:
+        auto_t = auto_title(trigger_card)
+        st.session_state["thread_titles"][thread_id] = auto_t
+        try:
+            save_thread_title(user_id, thread_id, auto_t)
+        except Exception:
+            pass
+    message_history.append({"role": "user", "content": prompt_to_stream, "agent_name": None})
+    with st.chat_message("user"):
+        st.markdown(prompt_to_stream)
 elif user_input:
     prompt_to_stream = user_input
     is_regeneration = False
     # Auto-title first message
     if not message_history:
+        auto_t = auto_title(user_input)
+        st.session_state["thread_titles"][thread_id] = auto_t
+        try:
+            save_thread_title(user_id, thread_id, auto_t)
+        except Exception:
+            pass  # Non-fatal — in-memory title is still set
+
+    # Display user message
+    message_history.append({"role": "user", "content": user_input, "agent_name": None})
+    with st.chat_message("user"):
+        st.markdown(user_input)
         auto_t = auto_title(user_input)
         st.session_state["thread_titles"][thread_id] = auto_t
         try:
@@ -987,7 +1389,7 @@ if prompt_to_stream:
         badge_placeholder = st.empty()
         thinking_placeholder = st.empty()
         thinking_placeholder.markdown(
-            '<span style="color:#6b7280;">🧭 Thinking…</span>', unsafe_allow_html=True
+            '<span style="color:#FF8066; font-size:13px; font-weight:500;">🧭 Thinking…</span>', unsafe_allow_html=True
         )
 
         st.session_state["_is_generating"] = True

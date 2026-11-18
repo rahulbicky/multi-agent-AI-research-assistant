@@ -266,6 +266,21 @@ def delete_thread(user_id: str, thread_id: str) -> bool:
                 (composite,),
             )
 
+            # Remove any contextual doubt conversations and messages
+            _ensure_doubt_tables(conn)
+            conn.execute(
+                """
+                DELETE FROM doubt_messages WHERE doubt_id IN (
+                    SELECT doubt_id FROM doubt_conversations WHERE user_id = ? AND parent_thread_id = ?
+                )
+                """,
+                (user_id, thread_id),
+            )
+            conn.execute(
+                "DELETE FROM doubt_conversations WHERE user_id = ? AND parent_thread_id = ?",
+                (user_id, thread_id),
+            )
+
         if deleted_checkpoints == 0:
             logger.warning(
                 "delete_thread: no checkpoints found for %s — may already be deleted",
@@ -488,3 +503,168 @@ def rewind_for_edit(user_id: str, thread_id: str, user_message_index: int) -> bo
         {"messages": [RemoveMessage(id=m.id) for m in to_remove if getattr(m, "id", None)]},
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Contextual Doubt Window (Task 5)
+# ---------------------------------------------------------------------------
+
+def _ensure_doubt_tables(conn: sqlite3.Connection) -> None:
+    """
+    Ensure the tables for contextual doubt conversations exist in SQLite.
+
+    doubt_conversations:
+        doubt_id TEXT PRIMARY KEY ("{user_id}:{parent_thread_id}:{message_index}")
+        user_id TEXT NOT NULL
+        parent_thread_id TEXT NOT NULL
+        message_index INTEGER NOT NULL
+        original_prompt TEXT
+        original_response TEXT
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+    doubt_messages:
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT
+        doubt_id            TEXT NOT NULL
+        role                TEXT NOT NULL ('user' | 'assistant')
+        content             TEXT NOT NULL
+        created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doubt_conversations (
+            doubt_id            TEXT PRIMARY KEY,
+            user_id             TEXT NOT NULL,
+            parent_thread_id    TEXT NOT NULL,
+            message_index       INTEGER NOT NULL,
+            original_prompt     TEXT,
+            original_response   TEXT,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS doubt_messages (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            doubt_id            TEXT NOT NULL,
+            role                TEXT NOT NULL,
+            content             TEXT NOT NULL,
+            created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doubt_messages_doubt_id ON doubt_messages(doubt_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_doubt_conv_lookup ON doubt_conversations(user_id, parent_thread_id, message_index)"
+    )
+    conn.commit()
+
+
+def make_doubt_id(user_id: str, thread_id: str, message_index: int) -> str:
+    """Generate the unique composite doubt ID for an assistant message."""
+    return f"{user_id}:{thread_id}:{message_index}"
+
+
+def save_doubt_meta(
+    user_id: str,
+    thread_id: str,
+    message_index: int,
+    original_prompt: str,
+    original_response: str,
+) -> str:
+    """
+    Save metadata for a contextual doubt conversation attached to an assistant message.
+    Returns the composite doubt_id.
+    """
+    conn = _get_connection()
+    _ensure_doubt_tables(conn)
+    doubt_id = make_doubt_id(user_id, thread_id, message_index)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO doubt_conversations (
+            doubt_id, user_id, parent_thread_id, message_index, original_prompt, original_response
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (doubt_id, user_id, thread_id, message_index, original_prompt, original_response),
+    )
+    conn.commit()
+    return doubt_id
+
+
+def get_doubt_meta(user_id: str, thread_id: str, message_index: int) -> dict | None:
+    """
+    Retrieve stored metadata for a doubt conversation.
+    Returns a dict with {doubt_id, original_prompt, original_response, created_at} or None.
+    """
+    conn = _get_connection()
+    _ensure_doubt_tables(conn)
+    doubt_id = make_doubt_id(user_id, thread_id, message_index)
+    row = conn.execute(
+        """
+        SELECT doubt_id, original_prompt, original_response, created_at
+        FROM doubt_conversations
+        WHERE doubt_id = ?
+        """,
+        (doubt_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "doubt_id": row[0],
+        "original_prompt": row[1] or "",
+        "original_response": row[2] or "",
+        "created_at": row[3],
+    }
+
+
+def add_doubt_message(
+    user_id: str,
+    thread_id: str,
+    message_index: int,
+    role: str,
+    content: str,
+) -> None:
+    """Append a user or assistant message to the doubt conversation."""
+    conn = _get_connection()
+    _ensure_doubt_tables(conn)
+    doubt_id = make_doubt_id(user_id, thread_id, message_index)
+    conn.execute(
+        """
+        INSERT INTO doubt_messages (doubt_id, role, content)
+        VALUES (?, ?, ?)
+        """,
+        (doubt_id, role, content),
+    )
+    conn.commit()
+
+
+def get_doubt_messages(user_id: str, thread_id: str, message_index: int) -> list[dict]:
+    """
+    Return all messages in the doubt conversation for an assistant response,
+    ordered chronologically.
+    Returns list of dicts: [{"role": str, "content": str, "created_at": str}]
+    """
+    conn = _get_connection()
+    _ensure_doubt_tables(conn)
+    doubt_id = make_doubt_id(user_id, thread_id, message_index)
+    rows = conn.execute(
+        """
+        SELECT role, content, created_at
+        FROM doubt_messages
+        WHERE doubt_id = ?
+        ORDER BY id ASC
+        """,
+        (doubt_id,),
+    ).fetchall()
+    return [{"role": r[0], "content": r[1], "created_at": r[2]} for r in rows]
+
+
+def clear_doubt_messages(user_id: str, thread_id: str, message_index: int) -> None:
+    """Clear all messages for a specific doubt conversation."""
+    conn = _get_connection()
+    _ensure_doubt_tables(conn)
+    doubt_id = make_doubt_id(user_id, thread_id, message_index)
+    conn.execute("DELETE FROM doubt_messages WHERE doubt_id = ?", (doubt_id,))
+    conn.commit()

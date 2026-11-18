@@ -48,7 +48,13 @@ from core.memory import (
     rewind_for_edit,
     save_message_feedback,
     get_message_feedback,
+    save_doubt_meta,
+    get_doubt_meta,
+    add_doubt_message,
+    get_doubt_messages,
+    clear_doubt_messages,
 )
+from core.doubt import answer_doubt
 from core.graph import chatbot
 from tools.tools import (
     ingest_document,
@@ -132,6 +138,8 @@ def _init_session():
         "_trigger_edit",
         "_trigger_card_prompt",
         "_stop_generation",
+        "_active_doubt",
+        "_pending_doubt_query",
     ):
         if _key not in st.session_state:
             st.session_state[_key] = None
@@ -204,6 +212,8 @@ def get_theme_css(theme: str) -> str:
         scrollbar_thumb  = "#F0C8B0"
         active_conv_bg   = "#FFF0E6"
         active_conv_border= "#FF8066"
+
+    max_w = "1420px" if st.session_state.get("_active_doubt") else "920px"
 
     return f"""
     <style>
@@ -342,10 +352,11 @@ def get_theme_css(theme: str) -> str:
     [data-testid="stMain"], .main .block-container {{
         background: {bg_main} !important;
         padding-top: 24px !important;
-        max-width: 920px !important;
+        max-width: {max_w} !important;
         margin: 0 auto !important;
         padding-left: 20px !important;
         padding-right: 20px !important;
+        transition: max-width 0.25s ease !important;
     }}
 
     /* ── Hero / Welcome screen ───────────────────────────────────────── */
@@ -542,6 +553,72 @@ def get_theme_css(theme: str) -> str:
         font-weight: 600 !important;
         box-shadow: 0 2px 8px {shadow_primary} !important;
     }}
+
+    /* ── Floating Ask Doubt Button (Task 5) ────────────────────────── */
+    .doubt-btn > button {{
+        background: rgba(255,107,53,0.12) !important;
+        border: 1px solid rgba(255,107,53,0.35) !important;
+        color: {primary} !important;
+        padding: 3px 12px !important;
+        font-size: 11.5px !important;
+        border-radius: 7px !important;
+        min-height: 0 !important;
+        line-height: 1.4 !important;
+        font-weight: 600 !important;
+        transition: all 0.18s ease !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+    }}
+    .doubt-btn > button:hover {{
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
+        color: #FFFFFF !important;
+        border-color: transparent !important;
+        box-shadow: 0 4px 14px {shadow_primary} !important;
+        transform: translateY(-1px) !important;
+    }}
+    .doubt-btn-active > button {{
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
+        border: 1px solid transparent !important;
+        color: #FFFFFF !important;
+        padding: 3px 12px !important;
+        font-size: 11.5px !important;
+        border-radius: 7px !important;
+        min-height: 0 !important;
+        line-height: 1.4 !important;
+        font-weight: 700 !important;
+        box-shadow: 0 4px 14px {shadow_primary} !important;
+    }}
+    .doubt-close-btn > button {{
+        background: transparent !important;
+        border: 1px solid {border_color} !important;
+        color: {text_muted} !important;
+        padding: 2px 8px !important;
+        font-size: 13px !important;
+        border-radius: 6px !important;
+        line-height: 1.2 !important;
+        transition: all 0.15s ease !important;
+    }}
+    .doubt-close-btn > button:hover {{
+        border-color: {primary} !important;
+        color: {primary} !important;
+        background: {user_bubble} !important;
+    }}
+    .stForm .stButton > button {{
+        background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        padding: 8px 16px !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 4px 12px {shadow_primary} !important;
+    }}
+    .stForm .stButton > button:hover {{
+        transform: translateY(-1px) !important;
+        box-shadow: 0 6px 18px {shadow_primary} !important;
+        filter: brightness(1.05) !important;
+    }}
     .msg-toolbar {{
         display: flex;
         gap: 8px;
@@ -721,11 +798,13 @@ def new_chat():
     st.session_state["message_history"] = []
     st.session_state["pending_upload_confirmation"] = None
     st.session_state["thread_titles"][new_tid] = "New Chat"
+    st.session_state["_active_doubt"] = None
 
 
 def switch_thread(tid: str):
     """Switch to an existing thread and restore its messages."""
     st.session_state["thread_id"] = tid
+    st.session_state["_active_doubt"] = None
     # Load from LangGraph checkpointer
     config = make_config(user_id, tid)
     try:
@@ -814,6 +893,7 @@ def _delete_dialog():
                 st.session_state["thread_id"] = new_tid
                 st.session_state["message_history"] = []
                 st.session_state["thread_titles"][new_tid] = "New Chat"
+            st.session_state["_active_doubt"] = None
             st.session_state["_delete_tid"] = None
             st.session_state["_delete_title"] = None
             st.rerun()
@@ -845,6 +925,7 @@ def _edit_dialog():
                 # Slice message_history up to this message
                 st.session_state["message_history"] = st.session_state["message_history"][:idx]
                 st.session_state["_trigger_edit"] = cleaned
+                st.session_state["_active_doubt"] = None
                 st.session_state["_edit_msg_idx"] = None
                 st.session_state["_edit_msg_content"] = None
                 st.rerun()
@@ -1104,181 +1185,32 @@ with st.sidebar:
 # Re-read current values (may have changed after sidebar interaction)
 thread_id = st.session_state["thread_id"]
 composite_key = f"{user_id}:{thread_id}"
-
 message_history = st.session_state["message_history"]
 
-# ── Welcome screen (empty chat) ──
-if not message_history:
-    st.markdown("""
-    <div class="hero-header">
-        <div class="hero-logo-ring">🤖</div>
-        <div class="hero-title">AI Research Assistant</div>
-        <div class="hero-subtitle">
-            Powered by Multi-Agent Intelligence · Groq · LangGraph<br>
-            Select a starter prompt below or ask any question to get started.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+# Validate active doubt state
+active_doubt = st.session_state.get("_active_doubt")
+if active_doubt is not None:
+    d_idx = active_doubt.get("message_index")
+    if (
+        d_idx is None
+        or d_idx >= len(message_history)
+        or message_history[d_idx].get("role") != "assistant"
+    ):
+        st.session_state["_active_doubt"] = None
+        active_doubt = None
 
-    c_col1, c_col2 = st.columns(2)
-    with c_col1:
-        st.markdown('<div class="card-btn">', unsafe_allow_html=True)
-        if st.button(
-            "🔍  **Web Research**\n\nSearch live web, news, stock quotes & current data in real time",
-            key="card_btn_research",
-            use_container_width=True,
-        ):
-            st.session_state["_trigger_card_prompt"] = "Search the web for the latest breakthroughs in multi-agent AI systems and summarize key trends."
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
+# Create side-by-side columns if contextual doubt window is open
+if active_doubt is not None:
+    col_main, col_doubt = st.columns([0.62, 0.38], gap="medium")
+else:
+    col_main = st.container()
+    col_doubt = None
 
-        st.markdown('<div class="card-btn" style="margin-top:12px;">', unsafe_allow_html=True)
-        if st.button(
-            "💻  **Coding Assistant**\n\nGenerate, debug, review and explain code in any language",
-            key="card_btn_coding",
-            use_container_width=True,
-        ):
-            st.session_state["_trigger_card_prompt"] = "Write a Python script for an asynchronous task queue with retry logic and error handling."
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with c_col2:
-        st.markdown('<div class="card-btn">', unsafe_allow_html=True)
-        doc_card_label = (
-            "📄  **Document Q&A**\n\nAsk questions about your uploaded documents"
-            if current_docs
-            else "📄  **Document Q&A**\n\nUpload a PDF, DOCX, TXT or MD in sidebar to ask questions"
-        )
-        if st.button(
-            doc_card_label,
-            key="card_btn_doc_qa",
-            use_container_width=True,
-        ):
-            if current_docs:
-                st.session_state["_trigger_card_prompt"] = "Summarize the key topics and findings across my uploaded documents."
-            else:
-                st.session_state["_trigger_card_prompt"] = "How does multi-document RAG work and what file types can I upload?"
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        st.markdown('<div class="card-btn" style="margin-top:12px;">', unsafe_allow_html=True)
-        if st.button(
-            "💬  **General Chat**\n\nAsk anything — from timeless knowledge to creative reasoning",
-            key="card_btn_general",
-            use_container_width=True,
-        ):
-            st.session_state["_trigger_card_prompt"] = "Explain how multi-agent LLM systems with a supervisor agent compare to single-prompt models."
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Handle interrupted / stopped generation from previous run ──
-if st.session_state.get("_is_generating"):
-    st.session_state["_is_generating"] = False
-    partial_text = st.session_state.get("_current_stream_text", "").strip()
-    partial_agent = st.session_state.get("_current_stream_agent", "General")
-    if partial_text:
-        message_history.append({
-            "role": "assistant",
-            "content": partial_text + "\n\n*(Generation stopped by user)*",
-            "agent_name": partial_agent,
-        })
-        st.session_state["message_history"] = message_history
-    st.session_state["_current_stream_text"] = ""
-    st.toast("⏹️ Generation stopped.")
-
-# ── Render existing messages ──
-last_assistant_idx = None
-for i in range(len(message_history) - 1, -1, -1):
-    if message_history[i].get("role") == "assistant":
-        last_assistant_idx = i
-        break
-
-for idx, msg in enumerate(message_history):
-    role = msg["role"]
-    content = msg["content"]
-    agent_name = msg.get("agent_name")
-
-    with st.chat_message(role):
-        if role == "assistant" and agent_name:
-            st.markdown(render_agent_badge(agent_name), unsafe_allow_html=True)
-        st.markdown(content)
-
-        if role == "user":
-            col_u, _ = st.columns([0.15, 0.85])
-            with col_u:
-                st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
-                if st.button("✏️ Edit", key=f"edit_btn_{idx}", help="Edit this message and re-branch the conversation"):
-                    st.session_state["_edit_msg_idx"] = idx
-                    st.session_state["_edit_msg_content"] = content
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
-
-        elif role == "assistant":
-            is_last = (idx == last_assistant_idx)
-            feedback_val = get_message_feedback(user_id, thread_id, idx)
-            like_cls = "msg-feedback-active" if feedback_val == "like" else "msg-action-btn"
-            dislike_cls = "msg-feedback-active" if feedback_val == "dislike" else "msg-action-btn"
-
-            col_c1, col_c2, col_f1, col_f2, _ = st.columns([0.16, 0.22, 0.11, 0.11, 0.40])
-            with col_c1:
-                st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
-                if st.button("📋 Copy", key=f"copy_btn_{idx}", help="Copy response to clipboard"):
-                    try:
-                        pyperclip.copy(content)
-                        st.toast("✅ Copied response to clipboard!")
-                    except Exception as exc:
-                        st.toast(f"⚠️ Copy failed: {exc}")
-                st.markdown('</div>', unsafe_allow_html=True)
-            with col_c2:
-                st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
-                if is_last:
-                    if st.button("🔄 Regenerate", key=f"regen_btn_{idx}", help="Regenerate this response"):
-                        rewound_prompt = rewind_for_regeneration(user_id, thread_id)
-                        if st.session_state["message_history"] and st.session_state["message_history"][-1]["role"] == "assistant":
-                            st.session_state["message_history"].pop()
-                        st.session_state["_trigger_regen"] = rewound_prompt or (
-                            st.session_state["message_history"][-1]["content"] if st.session_state["message_history"] else ""
-                        )
-                        st.rerun()
-                else:
-                    st.button("🔄 Regenerate", key=f"regen_btn_{idx}", disabled=True, help="Only the most recent response can be regenerated")
-                st.markdown('</div>', unsafe_allow_html=True)
-            with col_f1:
-                st.markdown(f'<div class="{like_cls}">', unsafe_allow_html=True)
-                if st.button("👍", key=f"like_btn_{idx}", help="Helpful response"):
-                    save_message_feedback(user_id, thread_id, idx, "like")
-                    st.toast("Thank you for your feedback! 👍")
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
-            with col_f2:
-                st.markdown(f'<div class="{dislike_cls}">', unsafe_allow_html=True)
-                if st.button("👎", key=f"dislike_btn_{idx}", help="Needs improvement"):
-                    save_message_feedback(user_id, thread_id, idx, "dislike")
-                    st.toast("Feedback recorded. We'll improve! 👎")
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Chat input + response
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Attachment / Document Context Indicator
-if current_docs:
-    doc_names = ", ".join(f"`{d.get('filename')}`" for d in current_docs[:3])
-    extra = f" +{len(current_docs) - 3} more" if len(current_docs) > 3 else ""
-    st.markdown(
-        f'<div style="font-size:11.5px; color:#FF8066; margin-bottom:6px; display:flex; align-items:center; gap:6px;">'
-        f'<span>📎</span> <span><b>{len(current_docs)} document(s) active:</b> {doc_names}{extra}</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-user_input = st.chat_input("Ask anything about research, documents, code, or general questions...")
-
+# Evaluate user inputs and triggers
 trigger_regen = st.session_state.pop("_trigger_regen", None)
 trigger_edit = st.session_state.pop("_trigger_edit", None)
 trigger_card = st.session_state.pop("_trigger_card_prompt", None)
+user_input = st.chat_input("Ask anything about research, documents, code, or general questions...")
 
 prompt_to_stream = None
 is_regeneration = False
@@ -1290,8 +1222,6 @@ elif trigger_edit:
     prompt_to_stream = trigger_edit
     is_regeneration = False
     message_history.append({"role": "user", "content": prompt_to_stream, "agent_name": None})
-    with st.chat_message("user"):
-        st.markdown(prompt_to_stream)
 elif trigger_card:
     prompt_to_stream = trigger_card
     is_regeneration = False
@@ -1303,227 +1233,506 @@ elif trigger_card:
         except Exception:
             pass
     message_history.append({"role": "user", "content": prompt_to_stream, "agent_name": None})
-    with st.chat_message("user"):
-        st.markdown(prompt_to_stream)
 elif user_input:
     prompt_to_stream = user_input
     is_regeneration = False
-    # Auto-title first message
     if not message_history:
         auto_t = auto_title(user_input)
         st.session_state["thread_titles"][thread_id] = auto_t
         try:
             save_thread_title(user_id, thread_id, auto_t)
         except Exception:
-            pass  # Non-fatal — in-memory title is still set
-
-    # Display user message
+            pass
     message_history.append({"role": "user", "content": user_input, "agent_name": None})
-    with st.chat_message("user"):
-        st.markdown(user_input)
-        auto_t = auto_title(user_input)
-        st.session_state["thread_titles"][thread_id] = auto_t
-        try:
-            save_thread_title(user_id, thread_id, auto_t)
-        except Exception:
-            pass  # Non-fatal — in-memory title is still set
 
-    # Display user message
-    message_history.append({"role": "user", "content": user_input, "agent_name": None})
-    with st.chat_message("user"):
-        st.markdown(user_input)
+# ── Render Main Chat Column ──
+with col_main:
+    # ── Welcome screen (empty chat) ──
+    if not message_history:
+        st.markdown("""
+        <div class="hero-header">
+            <div class="hero-logo-ring">🤖</div>
+            <div class="hero-title">AI Research Assistant</div>
+            <div class="hero-subtitle">
+                Powered by Multi-Agent Intelligence · Groq · LangGraph<br>
+                Select a starter prompt below or ask any question to get started.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-if prompt_to_stream:
-    pending_filename = st.session_state.get("pending_upload_confirmation")
-    if not pending_filename and current_docs:
-        pending_filename = current_docs[-1].get("filename")
-    normalized_input = prompt_to_stream.strip().lower().rstrip(".!?")
-    if not is_regeneration and pending_filename and normalized_input in {
-        "i have uploaded",
-        "i uploaded",
-        "uploaded",
-        "i uploaded files",
-        "i uploaded the document",
-        "uploaded documents",
-    }:
-        st.session_state["pending_upload_confirmation"] = None
-        num_docs = len(current_docs)
-        if num_docs > 1:
-            doc_names = ", ".join(f"`{d.get('filename')}`" for d in current_docs)
-            confirmation = (
-                f"✅ **{num_docs} documents indexed and ready** ({doc_names}).\n\n"
-                "You can ask questions comparing them, finding specific facts, or summarizing across documents."
-            )
-        else:
-            confirmation = (
-                f"✅ **{pending_filename}** is uploaded and ready.\n\n"
-                "Try asking: *What is the main topic?* or *Summarize the key findings.*"
-            )
-        with st.chat_message("assistant"):
-            st.markdown(render_agent_badge("RAG"), unsafe_allow_html=True)
-            st.markdown(confirmation)
-        message_history.append({
-            "role": "assistant",
-            "content": confirmation,
-            "agent_name": "RAG",
-        })
-        st.session_state["message_history"] = message_history
-        st.stop()
-
-    st.session_state["pending_upload_confirmation"] = None
-
-    # Build LangGraph config (isolated per user+thread)
-    config = make_config(user_id, thread_id)
-
-    # ── Stream the assistant response ──
-    with st.chat_message("assistant"):
-        stop_placeholder = st.empty()
-        with stop_placeholder:
-            st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
-            if st.button("⏹️ Stop Generating", key="stop_gen_active_btn", type="secondary"):
-                pass  # Clicking triggers Streamlit rerun, caught by top-level _is_generating handler
+        c_col1, c_col2 = st.columns(2)
+        with c_col1:
+            st.markdown('<div class="card-btn">', unsafe_allow_html=True)
+            if st.button(
+                "🔍  **Web Research**\n\nSearch live web, news, stock quotes & current data in real time",
+                key="card_btn_research",
+                use_container_width=True,
+            ):
+                st.session_state["_trigger_card_prompt"] = "Search the web for the latest breakthroughs in multi-agent AI systems and summarize key trends."
+                st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
-        status_holder = {"box": None, "error": False}
-        sources_holder = {"web": [], "rag_sources": {}}
-        badge_placeholder = st.empty()
-        thinking_placeholder = st.empty()
-        thinking_placeholder.markdown(
-            '<span style="color:#FF8066; font-size:13px; font-weight:500;">🧭 Thinking…</span>', unsafe_allow_html=True
+            st.markdown('<div class="card-btn" style="margin-top:12px;">', unsafe_allow_html=True)
+            if st.button(
+                "💻  **Coding Assistant**\n\nGenerate, debug, review and explain code in any language",
+                key="card_btn_coding",
+                use_container_width=True,
+            ):
+                st.session_state["_trigger_card_prompt"] = "Write a Python script for an asynchronous task queue with retry logic and error handling."
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with c_col2:
+            st.markdown('<div class="card-btn">', unsafe_allow_html=True)
+            doc_card_label = (
+                "📄  **Document Q&A**\n\nAsk questions about your uploaded documents"
+                if current_docs
+                else "📄  **Document Q&A**\n\nUpload a PDF, DOCX, TXT or MD in sidebar to ask questions"
+            )
+            if st.button(
+                doc_card_label,
+                key="card_btn_doc_qa",
+                use_container_width=True,
+            ):
+                if current_docs:
+                    st.session_state["_trigger_card_prompt"] = "Summarize the key topics and findings across my uploaded documents."
+                else:
+                    st.session_state["_trigger_card_prompt"] = "How does multi-document RAG work and what file types can I upload?"
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="card-btn" style="margin-top:12px;">', unsafe_allow_html=True)
+            if st.button(
+                "💬  **General Chat**\n\nAsk anything — from timeless knowledge to creative reasoning",
+                key="card_btn_general",
+                use_container_width=True,
+            ):
+                st.session_state["_trigger_card_prompt"] = "Explain how multi-agent LLM systems with a supervisor agent compare to single-prompt models."
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # Attachment / Document Context Indicator
+    if current_docs:
+        doc_names = ", ".join(f"`{d.get('filename')}`" for d in current_docs[:3])
+        extra = f" +{len(current_docs) - 3} more" if len(current_docs) > 3 else ""
+        st.markdown(
+            f'<div style="font-size:11.5px; color:#FF8066; margin-bottom:8px; display:flex; align-items:center; gap:6px;">'
+            f'<span>📎</span> <span><b>{len(current_docs)} document(s) active:</b> {doc_names}{extra}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
         )
 
-        st.session_state["_is_generating"] = True
-        st.session_state["_current_stream_text"] = ""
-        st.session_state["_current_stream_agent"] = "General"
-
-        def _parse_tool_payload(raw_content) -> dict | None:
-            """Best-effort JSON parse of a tool's structured output."""
-            if not isinstance(raw_content, str):
-                return None
-            try:
-                payload = json.loads(raw_content)
-                return payload if isinstance(payload, dict) else None
-            except (ValueError, TypeError):
-                return None
-
-        def stream_response():
-            """Generator yielding text tokens from the multi-agent graph."""
-            first_token = True
-            try:
-                for message_chunk, metadata in chatbot.stream(
-                    {
-                        "messages": [HumanMessage(content=prompt_to_stream)],
-                        "user_id": user_id,
-                        "thread_id": thread_id,
-                        "next_agent": None,
-                        "agent_name": None,
-                        "documents": None,
-                    },
-                    config=config,
-                    stream_mode="messages",
-                ):
-                    # ── Skip supervisor node output (classification word leaks into UI) ──
-                    node_name = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
-                    if node_name == "supervisor":
-                        continue
-
-                    # ── Tool execution indicator ──
-                    if isinstance(message_chunk, ToolMessage):
-                        tool_name = getattr(message_chunk, "name", "tool")
-                        label = tool_status_label(tool_name)
-                        if status_holder["box"] is None:
-                            status_holder["box"] = st.status(label, expanded=True)
-                        else:
-                            status_holder["box"].update(label=label, state="running", expanded=True)
-
-                        # Best-effort: surface a short progress line + capture sources.
-                        payload = _parse_tool_payload(message_chunk.content)
-                        if payload:
-                            if payload.get("error"):
-                                status_holder["box"].write(f"⚠️ {payload['error']}")
-                            elif tool_name == "duckduckgo_search" and payload.get("results"):
-                                results = payload["results"]
-                                status_holder["box"].write(f"Found {len(results)} result(s)")
-                                for r in results[:5]:
-                                    if r.get("title") and r.get("link"):
-                                        entry = {"title": r["title"], "link": r["link"]}
-                                        if entry not in sources_holder["web"]:
-                                            sources_holder["web"].append(entry)
-                            elif tool_name == "rag_tool" and payload.get("passages"):
-                                passages = payload["passages"]
-                                status_holder["box"].write(f"Retrieved {len(passages)} passage(s)")
-                                for p in passages:
-                                    src = p.get("source") or "Document"
-                                    if src not in sources_holder["rag_sources"]:
-                                        sources_holder["rag_sources"][src] = set()
-                                    if p.get("page"):
-                                        sources_holder["rag_sources"][src].add(p["page"])
-
-                    # ── AI response tokens (skip tool-call-only messages with no text) ──
-                    if isinstance(message_chunk, AIMessage) and message_chunk.content:
-                        # Skip if message has ONLY tool_calls and no actual text
-                        tool_calls = getattr(message_chunk, "tool_calls", [])
-                        if tool_calls and not str(message_chunk.content).strip():
-                            continue
-                        if first_token:
-                            thinking_placeholder.empty()
-                            first_token = False
-                        chunk_str = str(message_chunk.content)
-                        st.session_state["_current_stream_text"] += chunk_str
-                        yield chunk_str
-
-            except Exception as exc:
-                logger.error("Graph stream error: %s", exc)
-                thinking_placeholder.empty()
-                status_holder["error"] = True
-                if status_holder["box"] is not None:
-                    status_holder["box"].update(state="error", expanded=True)
-                yield f"\n\n⚠️ Something went wrong while generating a response: {exc}"
-
-        ai_response = st.write_stream(stream_response())
-        thinking_placeholder.empty()
-        stop_placeholder.empty()
+    # ── Handle interrupted / stopped generation from previous run ──
+    if st.session_state.get("_is_generating"):
         st.session_state["_is_generating"] = False
+        partial_text = st.session_state.get("_current_stream_text", "").strip()
+        partial_agent = st.session_state.get("_current_stream_agent", "General")
+        if partial_text:
+            message_history.append({
+                "role": "assistant",
+                "content": partial_text + "\n\n*(Generation stopped by user)*",
+                "agent_name": partial_agent,
+            })
+            st.session_state["message_history"] = message_history
         st.session_state["_current_stream_text"] = ""
+        st.toast("⏹️ Generation stopped.")
 
-        # Resolve tool status indicator
-        if status_holder["box"] is not None:
-            if status_holder["error"]:
-                status_holder["box"].update(label="⚠️ Tool error", state="error", expanded=True)
-            else:
-                status_holder["box"].update(
-                    label="✅ Tool finished", state="complete", expanded=False
+    # ── Render existing messages ──
+    last_assistant_idx = None
+    for i in range(len(message_history) - 1, -1, -1):
+        if message_history[i].get("role") == "assistant":
+            last_assistant_idx = i
+            break
+
+    for idx, msg in enumerate(message_history):
+        role = msg["role"]
+        content = msg["content"]
+        agent_name = msg.get("agent_name")
+
+        with st.chat_message(role):
+            if role == "assistant" and agent_name:
+                st.markdown(render_agent_badge(agent_name), unsafe_allow_html=True)
+            st.markdown(content)
+
+            if role == "user":
+                col_u, _ = st.columns([0.15, 0.85])
+                with col_u:
+                    st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
+                    if st.button("✏️ Edit", key=f"edit_btn_{idx}", help="Edit this message and re-branch the conversation"):
+                        st.session_state["_edit_msg_idx"] = idx
+                        st.session_state["_edit_msg_content"] = content
+                        st.session_state["_active_doubt"] = None
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+            elif role == "assistant":
+                is_last = (idx == last_assistant_idx)
+                feedback_val = get_message_feedback(user_id, thread_id, idx)
+                like_cls = "msg-feedback-active" if feedback_val == "like" else "msg-action-btn"
+                dislike_cls = "msg-feedback-active" if feedback_val == "dislike" else "msg-action-btn"
+
+                is_doubt_active = (
+                    active_doubt is not None and active_doubt.get("message_index") == idx
                 )
+                doubt_cls = "doubt-btn-active" if is_doubt_active else "doubt-btn"
+                doubt_label = "💭 Active" if is_doubt_active else "💬 Ask Doubt"
 
-        # Retrieve agent name from final graph state
-        try:
-            final_state = chatbot.get_state(config=config)
-            agent_name = final_state.values.get("agent_name", "General")
-        except Exception:
-            agent_name = "General"
-
-        # Show agent badge
-        badge_placeholder.markdown(render_agent_badge(agent_name), unsafe_allow_html=True)
-
-        # ── Sources panel (web links / document sources used for this answer) ──
-        if sources_holder["web"] or sources_holder["rag_sources"]:
-            with st.expander("🔗 Sources", expanded=False):
-                for s in sources_holder["web"]:
-                    st.markdown(f"- [{s['title']}]({s['link']})")
-                for src, pages in sources_holder["rag_sources"].items():
-                    ext = src.rsplit(".", 1)[-1].lower() if "." in src else ""
-                    icon = "📄" if ext == "pdf" else ("📑" if ext == "docx" else ("🗒️" if ext == "md" else "📝"))
-                    if pages:
-                        pages_str = ", ".join(f"p. {p}" for p in sorted(pages))
-                        st.markdown(f"- {icon} **{src}** ({pages_str})")
+                col_c1, col_c2, col_f1, col_f2, col_d, _ = st.columns([0.16, 0.23, 0.09, 0.09, 0.25, 0.18])
+                with col_c1:
+                    st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
+                    if st.button("📋 Copy", key=f"copy_btn_{idx}", help="Copy response to clipboard"):
+                        try:
+                            pyperclip.copy(content)
+                            st.toast("✅ Copied response to clipboard!")
+                        except Exception as exc:
+                            st.toast(f"⚠️ Copy failed: {exc}")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                with col_c2:
+                    st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
+                    if is_last:
+                        if st.button("🔄 Regenerate", key=f"regen_btn_{idx}", help="Regenerate this response"):
+                            rewound_prompt = rewind_for_regeneration(user_id, thread_id)
+                            if st.session_state["message_history"] and st.session_state["message_history"][-1]["role"] == "assistant":
+                                st.session_state["message_history"].pop()
+                            st.session_state["_trigger_regen"] = rewound_prompt or (
+                                st.session_state["message_history"][-1]["content"] if st.session_state["message_history"] else ""
+                            )
+                            st.session_state["_active_doubt"] = None
+                            st.rerun()
                     else:
-                        st.markdown(f"- {icon} **{src}**")
+                        st.button("🔄 Regenerate", key=f"regen_btn_{idx}", disabled=True, help="Only the most recent response can be regenerated")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                with col_f1:
+                    st.markdown(f'<div class="{like_cls}">', unsafe_allow_html=True)
+                    if st.button("👍", key=f"like_btn_{idx}", help="Helpful response"):
+                        save_message_feedback(user_id, thread_id, idx, "like")
+                        st.toast("Thank you for your feedback! 👍")
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+                with col_f2:
+                    st.markdown(f'<div class="{dislike_cls}">', unsafe_allow_html=True)
+                    if st.button("👎", key=f"dislike_btn_{idx}", help="Needs improvement"):
+                        save_message_feedback(user_id, thread_id, idx, "dislike")
+                        st.toast("Feedback recorded. We'll improve! 👎")
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+                with col_d:
+                    st.markdown(f'<div class="{doubt_cls}">', unsafe_allow_html=True)
+                    if st.button(doubt_label, key=f"doubt_btn_{idx}", help="Ask a doubt about this response"):
+                        if is_doubt_active:
+                            st.session_state["_active_doubt"] = None
+                        else:
+                            orig_prompt = ""
+                            for p_i in range(idx - 1, -1, -1):
+                                if message_history[p_i].get("role") == "user":
+                                    orig_prompt = str(message_history[p_i].get("content", ""))
+                                    break
+                            save_doubt_meta(user_id, thread_id, idx, orig_prompt, content)
+                            st.session_state["_active_doubt"] = {
+                                "message_index": idx,
+                                "original_prompt": orig_prompt,
+                                "original_response": content,
+                            }
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Save to display history
-    message_history.append({
-        "role": "assistant",
-        "content": ai_response or "",
-        "agent_name": agent_name,
-    })
-    st.session_state["message_history"] = message_history
-    st.rerun()
+    # ── Stream new response if user submitted input ──
+    if prompt_to_stream:
+        pending_filename = st.session_state.get("pending_upload_confirmation")
+        if not pending_filename and current_docs:
+            pending_filename = current_docs[-1].get("filename")
+        normalized_input = prompt_to_stream.strip().lower().rstrip(".!?")
+        if not is_regeneration and pending_filename and normalized_input in {
+            "i have uploaded",
+            "i uploaded",
+            "uploaded",
+            "i uploaded files",
+            "i uploaded the document",
+            "uploaded documents",
+        }:
+            st.session_state["pending_upload_confirmation"] = None
+            num_docs = len(current_docs)
+            if num_docs > 1:
+                doc_names = ", ".join(f"`{d.get('filename')}`" for d in current_docs)
+                confirmation = (
+                    f"✅ **{num_docs} documents indexed and ready** ({doc_names}).\n\n"
+                    "You can ask questions comparing them, finding specific facts, or summarizing across documents."
+                )
+            else:
+                confirmation = (
+                    f"✅ **{pending_filename}** is uploaded and ready.\n\n"
+                    "Try asking: *What is the main topic?* or *Summarize the key findings.*"
+                )
+            with st.chat_message("assistant"):
+                st.markdown(render_agent_badge("RAG"), unsafe_allow_html=True)
+                st.markdown(confirmation)
+            message_history.append({
+                "role": "assistant",
+                "content": confirmation,
+                "agent_name": "RAG",
+            })
+            st.session_state["message_history"] = message_history
+            st.stop()
+
+        st.session_state["pending_upload_confirmation"] = None
+        config = make_config(user_id, thread_id)
+
+        with st.chat_message("assistant"):
+            stop_placeholder = st.empty()
+            with stop_placeholder:
+                st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
+                if st.button("⏹️ Stop Generating", key="stop_gen_active_btn", type="secondary"):
+                    pass
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            status_holder = {"box": None, "error": False}
+            sources_holder = {"web": [], "rag_sources": {}}
+            badge_placeholder = st.empty()
+            thinking_placeholder = st.empty()
+            thinking_placeholder.markdown(
+                '<span style="color:#FF8066; font-size:13px; font-weight:500;">🧭 Thinking…</span>', unsafe_allow_html=True
+            )
+
+            st.session_state["_is_generating"] = True
+            st.session_state["_current_stream_text"] = ""
+            st.session_state["_current_stream_agent"] = "General"
+
+            def _parse_tool_payload(raw_content) -> dict | None:
+                if not isinstance(raw_content, str):
+                    return None
+                try:
+                    payload = json.loads(raw_content)
+                    return payload if isinstance(payload, dict) else None
+                except (ValueError, TypeError):
+                    return None
+
+            def stream_response():
+                first_token = True
+                try:
+                    for message_chunk, metadata in chatbot.stream(
+                        {
+                            "messages": [HumanMessage(content=prompt_to_stream)],
+                            "user_id": user_id,
+                            "thread_id": thread_id,
+                            "next_agent": None,
+                            "agent_name": None,
+                            "documents": None,
+                        },
+                        config=config,
+                        stream_mode="messages",
+                    ):
+                        node_name = metadata.get("langgraph_node", "") if isinstance(metadata, dict) else ""
+                        if node_name == "supervisor":
+                            continue
+
+                        if isinstance(message_chunk, ToolMessage):
+                            tool_name = getattr(message_chunk, "name", "tool")
+                            label = tool_status_label(tool_name)
+                            if status_holder["box"] is None:
+                                status_holder["box"] = st.status(label, expanded=True)
+                            else:
+                                status_holder["box"].update(label=label, state="running", expanded=True)
+
+                            payload = _parse_tool_payload(message_chunk.content)
+                            if payload:
+                                if payload.get("error"):
+                                    status_holder["box"].write(f"⚠️ {payload['error']}")
+                                elif tool_name == "duckduckgo_search" and payload.get("results"):
+                                    results = payload["results"]
+                                    status_holder["box"].write(f"Found {len(results)} result(s)")
+                                    for r in results[:5]:
+                                        if r.get("title") and r.get("link"):
+                                            entry = {"title": r["title"], "link": r["link"]}
+                                            if entry not in sources_holder["web"]:
+                                                sources_holder["web"].append(entry)
+                                elif tool_name == "rag_tool" and payload.get("passages"):
+                                    passages = payload["passages"]
+                                    status_holder["box"].write(f"Retrieved {len(passages)} passage(s)")
+                                    for p in passages:
+                                        src = p.get("source") or "Document"
+                                        if src not in sources_holder["rag_sources"]:
+                                            sources_holder["rag_sources"][src] = set()
+                                        if p.get("page"):
+                                            sources_holder["rag_sources"][src].add(p["page"])
+
+                        if isinstance(message_chunk, AIMessage) and message_chunk.content:
+                            tool_calls = getattr(message_chunk, "tool_calls", [])
+                            if tool_calls and not str(message_chunk.content).strip():
+                                continue
+                            if first_token:
+                                thinking_placeholder.empty()
+                                first_token = False
+                            chunk_str = str(message_chunk.content)
+                            st.session_state["_current_stream_text"] += chunk_str
+                            yield chunk_str
+
+                except Exception as exc:
+                    logger.error("Graph stream error: %s", exc)
+                    thinking_placeholder.empty()
+                    status_holder["error"] = True
+                    if status_holder["box"] is not None:
+                        status_holder["box"].update(state="error", expanded=True)
+                    yield f"\n\n⚠️ Something went wrong while generating a response: {exc}"
+
+            ai_response = st.write_stream(stream_response())
+            thinking_placeholder.empty()
+            stop_placeholder.empty()
+            st.session_state["_is_generating"] = False
+            st.session_state["_current_stream_text"] = ""
+
+            if status_holder["box"] is not None:
+                if status_holder["error"]:
+                    status_holder["box"].update(label="⚠️ Tool error", state="error", expanded=True)
+                else:
+                    status_holder["box"].update(
+                        label="✅ Tool finished", state="complete", expanded=False
+                    )
+
+            try:
+                final_state = chatbot.get_state(config=config)
+                agent_name = final_state.values.get("agent_name", "General")
+            except Exception:
+                agent_name = "General"
+
+            badge_placeholder.markdown(render_agent_badge(agent_name), unsafe_allow_html=True)
+
+            if sources_holder["web"] or sources_holder["rag_sources"]:
+                with st.expander("🔗 Sources", expanded=False):
+                    for s in sources_holder["web"]:
+                        st.markdown(f"- [{s['title']}]({s['link']})")
+                    for src, pages in sources_holder["rag_sources"].items():
+                        ext = src.rsplit(".", 1)[-1].lower() if "." in src else ""
+                        icon = "📄" if ext == "pdf" else ("📑" if ext == "docx" else ("🗒️" if ext == "md" else "📝"))
+                        if pages:
+                            pages_str = ", ".join(f"p. {p}" for p in sorted(pages))
+                            st.markdown(f"- {icon} **{src}** ({pages_str})")
+                        else:
+                            st.markdown(f"- {icon} **{src}**")
+
+        message_history.append({
+            "role": "assistant",
+            "content": ai_response or "",
+            "agent_name": agent_name,
+        })
+        st.session_state["message_history"] = message_history
+        st.rerun()
+
+# ── Render Right-Side Contextual Doubt Window (Task 5) ──
+if col_doubt is not None and active_doubt is not None:
+    with col_doubt:
+        d_idx = active_doubt["message_index"]
+        d_prompt = active_doubt.get("original_prompt", "")
+        d_resp = active_doubt.get("original_response", "")
+
+        # Top Header Bar
+        col_dh_title, col_dh_close = st.columns([0.84, 0.16])
+        with col_dh_title:
+            st.markdown(
+                f"""
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:2px;">
+                    <span style="font-size:1.15rem;">💭</span>
+                    <span style="font-weight:700; font-size:1.05rem; background: linear-gradient(135deg, #FF6B35, #FF8066); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">Ask Doubt</span>
+                    <span style="font-size:11px; background:rgba(255,107,53,0.15); color:#FF6B35; border:1px solid rgba(255,107,53,0.3); border-radius:6px; padding:2px 6px; font-weight:600;">Response #{d_idx + 1}</span>
+                </div>
+                <div style="font-size:11px; color:#9E8E84; margin-bottom:8px;">
+                    Ask targeted questions about this specific response
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col_dh_close:
+            st.markdown('<div class="doubt-close-btn">', unsafe_allow_html=True)
+            if st.button("✕", key="close_doubt_panel_btn", help="Close doubt window"):
+                st.session_state["_active_doubt"] = None
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # Context Card
+        with st.expander("📌 Context Excerpt", expanded=False):
+            if d_prompt:
+                st.markdown(f"**Your Question:**\n> {d_prompt}")
+            resp_preview = d_resp[:280] + "…" if len(d_resp) > 280 else d_resp
+            st.markdown(f"**Original Response Excerpt:**\n> {resp_preview}")
+
+        # Retrieve doubt messages from SQLite
+        doubt_messages = get_doubt_messages(user_id, thread_id, d_idx)
+
+        # Scrollable container for doubt conversation
+        doubt_container = st.container(height=380)
+        with doubt_container:
+            if not doubt_messages:
+                st.markdown(
+                    """
+                    <div style="text-align:center; padding:28px 12px; color:#9E8E84; font-size:12.5px;">
+                        <div style="font-size:1.8rem; margin-bottom:8px;">🤔</div>
+                        <b>What would you like clarified?</b><br>
+                        Ask for an explanation of any concept, request an example, or ask to break it down step-by-step.
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                q_c1, q_c2 = st.columns(2)
+                with q_c1:
+                    if st.button("💡 Simplify this", key="doubt_chip_simplify", use_container_width=True):
+                        st.session_state["_pending_doubt_query"] = "Can you simplify and explain the key point of this response in layman's terms?"
+                        st.rerun()
+                with q_c2:
+                    if st.button("📝 Give an example", key="doubt_chip_example", use_container_width=True):
+                        st.session_state["_pending_doubt_query"] = "Can you provide a concrete real-world example to illustrate this response?"
+                        st.rerun()
+            else:
+                for d_msg in doubt_messages:
+                    d_role = d_msg.get("role", "user")
+                    d_text = d_msg.get("content", "")
+                    with st.chat_message(d_role):
+                        st.markdown(d_text)
+
+        # Clear doubt history button
+        if doubt_messages:
+            col_d_clear, _ = st.columns([0.45, 0.55])
+            with col_d_clear:
+                st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
+                if st.button("🗑️ Clear doubts", key=f"clear_doubt_hist_{d_idx}", help="Clear doubt conversation for this response"):
+                    clear_doubt_messages(user_id, thread_id, d_idx)
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+
+        pending_doubt = st.session_state.pop("_pending_doubt_query", None)
+
+        with st.form(key=f"doubt_form_{d_idx}", clear_on_submit=True):
+            f_col_in, f_col_btn = st.columns([0.78, 0.22])
+            with f_col_in:
+                new_doubt_text = st.text_input(
+                    "Your doubt",
+                    placeholder="Ask a doubt about this response...",
+                    label_visibility="collapsed",
+                    key=f"doubt_text_input_{d_idx}",
+                )
+            with f_col_btn:
+                submit_doubt = st.form_submit_button("Ask ➔", type="primary", use_container_width=True)
+
+        query_to_process = None
+        if submit_doubt and new_doubt_text and new_doubt_text.strip():
+            query_to_process = new_doubt_text.strip()
+        elif pending_doubt:
+            query_to_process = pending_doubt
+
+        if query_to_process:
+            add_doubt_message(user_id, thread_id, d_idx, "user", query_to_process)
+            history_for_llm = get_doubt_messages(user_id, thread_id, d_idx)[:-1]
+
+            with doubt_container:
+                with st.chat_message("user"):
+                    st.markdown(query_to_process)
+                with st.chat_message("assistant"):
+                    with st.spinner("Clarifying..."):
+                        answer = answer_doubt(
+                            original_prompt=d_prompt,
+                            original_response=d_resp,
+                            doubt_history=history_for_llm,
+                            new_query=query_to_process,
+                        )
+                        st.markdown(answer)
+
+            add_doubt_message(user_id, thread_id, d_idx, "assistant", answer)
+            st.rerun()

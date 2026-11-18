@@ -1,5 +1,15 @@
+[theme]
+primaryColor = "#FF6B35"
+backgroundColor = "#17131A"
+secondaryBackgroundColor = "#1E1820"
+textColor = "#F5EEE8"
+font = "sans serif"
+
 [server]
-fileWatcherType = "none"
+fileWatcherType = "auto"
+runOnSave = true
+headless = true
+port = 8501
 
 [logger]
 level = "error"

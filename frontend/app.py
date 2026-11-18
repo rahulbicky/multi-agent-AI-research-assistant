@@ -29,7 +29,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import streamlit as st
-import pyperclip
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.config import settings
@@ -44,10 +43,7 @@ from core.memory import (
     search_user_threads,
     get_user_setting,
     set_user_setting,
-    rewind_for_regeneration,
     rewind_for_edit,
-    save_message_feedback,
-    get_message_feedback,
     save_doubt_meta,
     get_doubt_meta,
     add_doubt_message,
@@ -245,7 +241,6 @@ def _init_session():
         "_delete_title",
         "_edit_msg_idx",
         "_edit_msg_content",
-        "_trigger_regen",
         "_trigger_edit",
         "_trigger_card_prompt",
         "_stop_generation",
@@ -460,9 +455,9 @@ def get_theme_css(theme: str) -> str:
     }}
 
     /* ── Main content area ───────────────────────────────────────────── */
-    [data-testid="stMain"], .main .block-container {{
+    [data-testid="stMainBlockContainer"], [data-testid="stMain"], .main .block-container {{
         background: {bg_main} !important;
-        padding-top: 24px !important;
+        padding-top: 16px !important;
         max-width: {max_w} !important;
         margin: 0 auto !important;
         padding-left: 20px !important;
@@ -588,52 +583,76 @@ def get_theme_css(theme: str) -> str:
     [data-testid="stChatMessage"] {{
         background: transparent !important;
         border: none !important;
-        padding: 4px 0 !important;
+        padding: 5px 0 !important;
+        margin-bottom: 5px !important;
     }}
 
-    /* Assistant message bubble — clean, spacious card surface */
+    /* Assistant messages stay open and readable without a card surface. */
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]),
     [data-testid="stChatMessage"]:not(:has([data-testid="chatAvatarIcon-user"])) {{
-        max-width: 98% !important;
+        width: 100% !important;
+        max-width: 100% !important;
         margin-right: auto !important;
-        padding: 4px 0 !important;
+        padding: 6px 0 !important;
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) [data-testid="stChatMessageContent"],
     [data-testid="stChatMessage"]:not(:has([data-testid="chatAvatarIcon-user"])) [data-testid="stChatMessageContent"] {{
-        background: {card_bg} !important;
-        border: 1px solid {border_color} !important;
-        border-radius: 4px 18px 18px 18px !important;
-        padding: 16px 20px !important;
-        box-shadow: 0 4px 16px {shadow_card} !important;
+        width: 100% !important;
+        max-width: 840px !important;
+        background: transparent !important;
+        border: none !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        box-shadow: none !important;
         color: {text_main} !important;
-        font-size: 14.5px !important;
-        line-height: 1.65 !important;
+        font-size: 15px !important;
+        line-height: 1.7 !important;
     }}
 
-    /* User message bubble — compact, right-aligned speech card */
+    /* User messages use a text-sized bubble aligned to the right. */
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]),
     .stChatMessage.user,
     [data-testid="stChatMessage"][class*="user"],
     [data-testid="stChatMessage"][data-testid*="user"] {{
         flex-direction: row-reverse !important;
-        margin-left: auto !important;
-        max-width: 78% !important;
+        justify-content: flex-start !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        margin: 0 0 5px auto !important;
         padding: 4px 0 !important;
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stChatMessageContent"],
     .stChatMessage.user [data-testid="stChatMessageContent"],
     [data-testid="stChatMessage"][class*="user"] [data-testid="stChatMessageContent"] {{
+        flex: 1 1 auto !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: flex-end !important;
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        box-shadow: none !important;
+    }}
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdown"] {{
+        width: fit-content !important;
+        max-width: min(78%, 680px) !important;
+        align-self: flex-end !important;
+    }}
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdownContainer"] {{
+        width: fit-content !important;
+        max-width: 100% !important;
         background: {user_bubble} !important;
         border: 1px solid {user_border} !important;
-        border-radius: 18px 4px 18px 18px !important;
-        padding: 10px 16px !important;
+        border-radius: 18px 5px 18px 18px !important;
+        padding: 9px 14px !important;
         color: {text_main} !important;
-        box-shadow: 0 2px 10px {shadow_card} !important;
-        font-size: 14.5px !important;
+        box-shadow: 0 2px 8px {shadow_card} !important;
+        font-size: 14px !important;
         line-height: 1.55 !important;
-        width: auto !important;
     }}
-    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) p {{
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdownContainer"] p {{
         margin-bottom: 0 !important;
         color: {text_main} !important;
     }}
@@ -669,8 +688,8 @@ def get_theme_css(theme: str) -> str:
         line-height: 1.3 !important;
     }}
     [data-testid="stChatMessageContent"] p {{
-        margin-bottom: 10px !important;
-        line-height: 1.65 !important;
+        margin-bottom: 9px !important;
+        line-height: 1.7 !important;
     }}
     [data-testid="stChatMessageContent"] ul,
     [data-testid="stChatMessageContent"] ol {{
@@ -768,21 +787,8 @@ def get_theme_css(theme: str) -> str:
         border-color: {primary} !important;
         background: {user_bubble} !important;
     }}
-    .msg-feedback-active > button {{
-        background: {user_bubble} !important;
-        border: 1px solid {primary} !important;
-        color: {primary} !important;
-        padding: 3px 10px !important;
-        font-size: 11px !important;
-        border-radius: 7px !important;
-        min-height: 0 !important;
-        line-height: 1.4 !important;
-        font-weight: 600 !important;
-        box-shadow: 0 2px 8px {shadow_primary} !important;
-    }}
-
     /* ── Floating Ask Doubt Button (Task 5) ────────────────────────── */
-    .doubt-btn > button {{
+    [data-testid="stColumn"]:has(.doubt-btn) [data-testid="stButton"] > button {{
         background: rgba(255,107,53,0.12) !important;
         border: 1px solid rgba(255,107,53,0.35) !important;
         color: {primary} !important;
@@ -797,14 +803,17 @@ def get_theme_css(theme: str) -> str:
         align-items: center !important;
         gap: 4px !important;
     }}
-    .doubt-btn > button:hover {{
+    [data-testid="stColumn"]:has(.doubt-btn) [data-testid="stVerticalBlock"] {{
+        align-items: flex-end !important;
+    }}
+    [data-testid="stColumn"]:has(.doubt-btn) [data-testid="stButton"] > button:hover {{
         background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
         color: #FFFFFF !important;
         border-color: transparent !important;
         box-shadow: 0 4px 14px {shadow_primary} !important;
         transform: translateY(-1px) !important;
     }}
-    .doubt-btn-active > button {{
+    [data-testid="stColumn"]:has(.doubt-btn-active) [data-testid="stButton"] > button {{
         background: linear-gradient(135deg, {primary} 0%, {primary_coral} 100%) !important;
         border: 1px solid transparent !important;
         color: #FFFFFF !important;
@@ -910,6 +919,59 @@ def get_theme_css(theme: str) -> str:
         cursor: not-allowed !important;
     }}
 
+    /* ── Contextual doubt layout ─────────────────────────────────────── */
+    [data-testid="stHorizontalBlock"]:has(.chat-scroll-marker) {{
+        align-items: flex-start !important;
+        gap: 1rem !important;
+    }}
+    [data-testid="stColumn"]:has(.chat-scroll-marker) {{
+        min-width: 0 !important;
+    }}
+    [data-testid="stColumn"]:has(.chat-scroll-marker) > [data-testid="stVerticalBlock"] {{
+        height: calc(100dvh - 6rem) !important;
+        max-height: calc(100dvh - 6rem) !important;
+        overflow-y: auto !important;
+        overscroll-behavior: contain !important;
+        scrollbar-gutter: stable;
+    }}
+    [data-testid="stColumn"]:has(.doubt-panel-anchor) {{
+        position: fixed !important;
+        top: 0.75rem !important;
+        right: 1rem !important;
+        width: clamp(300px, calc((100vw - 320px) * 0.52), 560px) !important;
+        bottom: max(7.5rem, env(safe-area-inset-bottom)) !important;
+        height: auto !important;
+        min-width: 0 !important;
+        z-index: 20 !important;
+    }}
+    [data-testid="stColumn"]:has(.doubt-panel-anchor) > [data-testid="stVerticalBlock"] {{
+        height: 100% !important;
+        max-height: 100% !important;
+        overflow-y: auto !important;
+        overscroll-behavior: contain !important;
+        scrollbar-gutter: stable;
+    }}
+    .st-key-doubt-panel-header {{
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 5 !important;
+        background: {bg_main} !important;
+        padding: 8px 0 !important;
+        border-bottom: 1px solid {border_color} !important;
+    }}
+    .st-key-doubt-chat-history {{
+        overscroll-behavior: contain !important;
+        scrollbar-gutter: stable;
+    }}
+    .st-key-doubt-panel-form {{
+        position: sticky !important;
+        bottom: 0 !important;
+        z-index: 4 !important;
+        background: {bg_main} !important;
+        padding: 8px 0 !important;
+        border-top: 1px solid {border_color} !important;
+    }}
+
     /* ── Status / tool indicator ─────────────────────────────────────── */
     [data-testid="stStatus"] {{
         background: {card_bg} !important;
@@ -985,6 +1047,38 @@ def get_theme_css(theme: str) -> str:
         [data-testid="stMain"], .main .block-container {{
             padding-left: 10px !important;
             padding-right: 10px !important;
+        }}
+        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdown"] {{
+            max-width: 88% !important;
+        }}
+        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) [data-testid="stChatMessageContent"] {{
+            font-size: 14.5px !important;
+        }}
+        [data-testid="stHorizontalBlock"]:has(.doubt-panel-anchor) {{
+            display: block !important;
+        }}
+        [data-testid="stColumn"]:has(.chat-scroll-marker) {{
+            width: 100% !important;
+        }}
+        [data-testid="stColumn"]:has(.chat-scroll-marker) > [data-testid="stVerticalBlock"] {{
+            height: calc(100dvh - 6rem) !important;
+            max-height: calc(100dvh - 6rem) !important;
+        }}
+        [data-testid="stColumn"]:has(.doubt-panel-anchor) {{
+            position: fixed !important;
+            inset: max(8px, env(safe-area-inset-top)) 8px max(7.5rem, env(safe-area-inset-bottom)) !important;
+            width: auto !important;
+            height: auto !important;
+            z-index: 1000 !important;
+            padding: 10px !important;
+            border: 1px solid {border_color} !important;
+            border-radius: 14px !important;
+            background: {bg_main} !important;
+            box-shadow: 0 12px 40px {shadow_card} !important;
+        }}
+        [data-testid="stColumn"]:has(.doubt-panel-anchor) > [data-testid="stVerticalBlock"] {{
+            height: 100% !important;
+            max-height: 100% !important;
         }}
     }}
     @media (max-width: 480px) {{
@@ -1460,13 +1554,12 @@ if active_doubt is not None:
 
 # Create side-by-side columns if contextual doubt window is open
 if active_doubt is not None:
-    col_main, col_doubt = st.columns([0.62, 0.38], gap="medium")
+    col_main, col_doubt = st.columns([0.55, 0.45], gap="medium")
 else:
     col_main = st.container()
     col_doubt = None
 
 # Evaluate user inputs and triggers
-trigger_regen = st.session_state.pop("_trigger_regen", None)
 trigger_edit = st.session_state.pop("_trigger_edit", None)
 trigger_card = st.session_state.pop("_trigger_card_prompt", None)
 
@@ -1477,18 +1570,11 @@ user_input = st.chat_input(
 )
 
 prompt_to_stream = None
-is_regeneration = False
-
-if trigger_regen:
-    prompt_to_stream = trigger_regen
-    is_regeneration = True
-elif trigger_edit:
+if trigger_edit:
     prompt_to_stream = trigger_edit
-    is_regeneration = False
     append_user_message(prompt_to_stream)
 elif trigger_card:
     prompt_to_stream = trigger_card
-    is_regeneration = False
     if not message_history:
         auto_t = auto_title(trigger_card)
         st.session_state["thread_titles"][thread_id] = auto_t
@@ -1501,7 +1587,6 @@ elif user_input and not is_generating:
     cleaned_input = clean_markdown_content(user_input).strip()
     if cleaned_input:
         prompt_to_stream = cleaned_input
-        is_regeneration = False
         if not message_history:
             auto_t = auto_title(cleaned_input)
             st.session_state["thread_titles"][thread_id] = auto_t
@@ -1513,6 +1598,9 @@ elif user_input and not is_generating:
 
 # ── Render Main Chat Column ──
 with col_main:
+    if active_doubt is not None:
+        st.markdown('<span class="chat-scroll-marker" aria-hidden="true"></span>', unsafe_allow_html=True)
+
     # ── Welcome screen (empty chat) ──
     if not message_history:
         st.markdown("""
@@ -1602,12 +1690,6 @@ with col_main:
         st.toast("⏹️ Generation stopped.")
 
     # ── Render existing messages ──
-    last_assistant_idx = None
-    for i in range(len(message_history) - 1, -1, -1):
-        if message_history[i].get("role") == "assistant":
-            last_assistant_idx = i
-            break
-
     for idx, msg in enumerate(message_history):
         role = msg["role"]
         content = clean_markdown_content(msg.get("content", ""))
@@ -1619,7 +1701,7 @@ with col_main:
             st.markdown(content)
 
             if role == "user":
-                col_u_space, col_u_edit = st.columns([0.88, 0.12])
+                _, col_u_edit = st.columns([0.88, 0.12])
                 with col_u_edit:
                     st.markdown('<div class="user-edit-btn">', unsafe_allow_html=True)
                     if st.button("✏️ Edit", key=f"edit_btn_{idx}", help="Edit this message and re-branch the conversation"):
@@ -1630,68 +1712,31 @@ with col_main:
                     st.markdown('</div>', unsafe_allow_html=True)
 
             elif role == "assistant":
-                is_last = (idx == last_assistant_idx)
-                feedback_val = get_message_feedback(user_id, thread_id, idx)
-                like_cls = "msg-feedback-active" if feedback_val == "like" else "msg-action-btn"
-                dislike_cls = "msg-feedback-active" if feedback_val == "dislike" else "msg-action-btn"
-
                 is_doubt_active = (
                     active_doubt is not None and active_doubt.get("message_index") == idx
                 )
                 doubt_cls = "doubt-btn-active" if is_doubt_active else "doubt-btn"
                 doubt_label = "💭 Active" if is_doubt_active else "💬 Ask Doubt"
 
-                col_c1, col_c2, col_f1, col_f2, col_d, _ = st.columns([0.16, 0.23, 0.09, 0.09, 0.25, 0.18])
-                with col_c1:
-                    st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
-                    if st.button("📋 Copy", key=f"copy_btn_{idx}", help="Copy response to clipboard"):
-                        try:
-                            pyperclip.copy(content)
-                            st.toast("✅ Copied response to clipboard!")
-                        except Exception as exc:
-                            st.toast(f"⚠️ Copy failed: {exc}")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                with col_c2:
-                    st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
-                    if is_last:
-                        if st.button("🔄 Regenerate", key=f"regen_btn_{idx}", help="Regenerate this response"):
-                            rewound_prompt = rewind_for_regeneration(user_id, thread_id)
-                            if st.session_state["message_history"] and st.session_state["message_history"][-1]["role"] == "assistant":
-                                st.session_state["message_history"].pop()
-                            st.session_state["_trigger_regen"] = rewound_prompt or (
-                                st.session_state["message_history"][-1]["content"] if st.session_state["message_history"] else ""
-                            )
-                            st.session_state["_active_doubt"] = None
-                            st.rerun()
-                    else:
-                        st.button("🔄 Regenerate", key=f"regen_btn_{idx}", disabled=True, help="Only the most recent response can be regenerated")
-                    st.markdown('</div>', unsafe_allow_html=True)
-                with col_f1:
-                    st.markdown(f'<div class="{like_cls}">', unsafe_allow_html=True)
-                    if st.button("👍", key=f"like_btn_{idx}", help="Helpful response"):
-                        save_message_feedback(user_id, thread_id, idx, "like")
-                        st.toast("Thank you for your feedback! 👍")
-                        st.rerun()
-                    st.markdown('</div>', unsafe_allow_html=True)
-                with col_f2:
-                    st.markdown(f'<div class="{dislike_cls}">', unsafe_allow_html=True)
-                    if st.button("👎", key=f"dislike_btn_{idx}", help="Needs improvement"):
-                        save_message_feedback(user_id, thread_id, idx, "dislike")
-                        st.toast("Feedback recorded. We'll improve! 👎")
-                        st.rerun()
-                    st.markdown('</div>', unsafe_allow_html=True)
+                _, col_d = st.columns([0.72, 0.28])
                 with col_d:
                     st.markdown(f'<div class="{doubt_cls}">', unsafe_allow_html=True)
                     if st.button(doubt_label, key=f"doubt_btn_{idx}", help="Ask a doubt about this response"):
                         if is_doubt_active:
                             st.session_state["_active_doubt"] = None
                         else:
-                            orig_prompt = ""
-                            for p_i in range(idx - 1, -1, -1):
-                                if message_history[p_i].get("role") == "user":
-                                    orig_prompt = str(message_history[p_i].get("content", ""))
-                                    break
-                            save_doubt_meta(user_id, thread_id, idx, orig_prompt, content)
+                            doubt_meta = get_doubt_meta(user_id, thread_id, idx)
+                            if doubt_meta and doubt_meta.get("original_response") == content:
+                                orig_prompt = doubt_meta.get("original_prompt", "")
+                            else:
+                                orig_prompt = ""
+                                for p_i in range(idx - 1, -1, -1):
+                                    if message_history[p_i].get("role") == "user":
+                                        orig_prompt = str(message_history[p_i].get("content", ""))
+                                        break
+                                if doubt_meta:
+                                    clear_doubt_messages(user_id, thread_id, idx)
+                                save_doubt_meta(user_id, thread_id, idx, orig_prompt, content)
                             st.session_state["_active_doubt"] = {
                                 "message_index": idx,
                                 "original_prompt": orig_prompt,
@@ -1706,7 +1751,7 @@ with col_main:
         if not pending_filename and current_docs:
             pending_filename = current_docs[-1].get("filename")
         normalized_input = prompt_to_stream.strip().lower().rstrip(".!?")
-        if not is_regeneration and pending_filename and normalized_input in {
+        if pending_filename and normalized_input in {
             "i have uploaded",
             "i uploaded",
             "uploaded",
@@ -1732,7 +1777,7 @@ with col_main:
                 st.markdown(render_agent_badge("RAG"), unsafe_allow_html=True)
                 st.markdown(confirmation)
             append_assistant_message(confirmation, agent_name="RAG")
-            st.stop()
+            st.rerun()
 
         st.session_state["pending_upload_confirmation"] = None
         config = make_config(user_id, thread_id)
@@ -1888,32 +1933,34 @@ with col_main:
 # ── Render Right-Side Contextual Doubt Window (Task 5) ──
 if col_doubt is not None and active_doubt is not None:
     with col_doubt:
+        st.markdown('<span class="doubt-panel-anchor" aria-hidden="true"></span>', unsafe_allow_html=True)
         d_idx = active_doubt["message_index"]
         d_prompt = active_doubt.get("original_prompt", "")
         d_resp = active_doubt.get("original_response", "")
 
         # Top Header Bar
-        col_dh_title, col_dh_close = st.columns([0.84, 0.16])
-        with col_dh_title:
-            st.markdown(
-                f"""
-                <div style="display:flex; align-items:center; gap:8px; margin-bottom:2px;">
-                    <span style="font-size:1.15rem;">💭</span>
-                    <span style="font-weight:700; font-size:1.05rem; background: linear-gradient(135deg, #FF6B35, #FF8066); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">Ask Doubt</span>
-                    <span style="font-size:11px; background:rgba(255,107,53,0.15); color:#FF6B35; border:1px solid rgba(255,107,53,0.3); border-radius:6px; padding:2px 6px; font-weight:600;">Response #{d_idx + 1}</span>
-                </div>
-                <div style="font-size:11px; color:#9E8E84; margin-bottom:8px;">
-                    Ask targeted questions about this specific response
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with col_dh_close:
-            st.markdown('<div class="doubt-close-btn">', unsafe_allow_html=True)
-            if st.button("✕", key="close_doubt_panel_btn", help="Close doubt window"):
-                st.session_state["_active_doubt"] = None
-                st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(key="doubt-panel-header", border=False):
+            col_dh_title, col_dh_close = st.columns([0.84, 0.16])
+            with col_dh_title:
+                st.markdown(
+                    f"""
+                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:2px;">
+                        <span style="font-size:1.15rem;">💭</span>
+                        <span style="font-weight:700; font-size:1.05rem; background: linear-gradient(135deg, #FF6B35, #FF8066); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">Ask Doubt</span>
+                        <span style="font-size:11px; background:rgba(255,107,53,0.15); color:#FF6B35; border:1px solid rgba(255,107,53,0.3); border-radius:6px; padding:2px 6px; font-weight:600;">Response #{d_idx + 1}</span>
+                    </div>
+                    <div style="font-size:11px; color:#9E8E84; margin-bottom:8px;">
+                        Ask targeted questions about this specific response
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with col_dh_close:
+                st.markdown('<div class="doubt-close-btn">', unsafe_allow_html=True)
+                if st.button("✕", key="close_doubt_panel_btn", help="Close doubt window"):
+                    st.session_state["_active_doubt"] = None
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
         # Context Card
         with st.expander("📌 Context Excerpt", expanded=False):
@@ -1926,7 +1973,7 @@ if col_doubt is not None and active_doubt is not None:
         doubt_messages = get_doubt_messages(user_id, thread_id, d_idx)
 
         # Scrollable container for doubt conversation
-        doubt_container = st.container(height=380)
+        doubt_container = st.container(height=240, key="doubt-chat-history")
         with doubt_container:
             if not doubt_messages:
                 st.markdown(
@@ -1967,17 +2014,18 @@ if col_doubt is not None and active_doubt is not None:
 
         pending_doubt = st.session_state.pop("_pending_doubt_query", None)
 
-        with st.form(key=f"doubt_form_{d_idx}", clear_on_submit=True):
-            f_col_in, f_col_btn = st.columns([0.78, 0.22])
-            with f_col_in:
-                new_doubt_text = st.text_input(
-                    "Your doubt",
-                    placeholder="Ask a doubt about this response...",
-                    label_visibility="collapsed",
-                    key=f"doubt_text_input_{d_idx}",
-                )
-            with f_col_btn:
-                submit_doubt = st.form_submit_button("Ask ➔", type="primary", use_container_width=True)
+        with st.container(key="doubt-panel-form", border=False):
+            with st.form(key=f"doubt_form_{d_idx}", clear_on_submit=True):
+                f_col_in, f_col_btn = st.columns([0.68, 0.32])
+                with f_col_in:
+                    new_doubt_text = st.text_input(
+                        "Your doubt",
+                        placeholder="Ask a doubt about this response...",
+                        label_visibility="collapsed",
+                        key=f"doubt_text_input_{d_idx}",
+                    )
+                with f_col_btn:
+                    submit_doubt = st.form_submit_button("Ask ➔", type="primary", use_container_width=True)
 
         query_to_process = None
         if submit_doubt and new_doubt_text and new_doubt_text.strip():

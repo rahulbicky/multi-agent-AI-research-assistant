@@ -76,6 +76,74 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Message Formatting & Idempotent History Utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clean_markdown_content(text: str) -> str:
+    """
+    Format message text cleanly for Markdown rendering.
+    Converts literal HTML <br>, <br/>, <br /> into native Markdown newlines,
+    and strips unwanted trailing whitespace so literal tags do not appear.
+    """
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+
+
+def append_user_message(content: str) -> bool:
+    """
+    Safely append a user message to message_history with idempotency.
+    Returns True if appended, False if duplicate was blocked.
+    """
+    cleaned = clean_markdown_content(str(content or "")).strip()
+    if not cleaned:
+        return False
+
+    msgs = st.session_state.setdefault("message_history", [])
+
+    # Idempotency guard: block consecutive duplicate user messages
+    if msgs and msgs[-1].get("role") == "user" and msgs[-1].get("content") == cleaned:
+        logger.warning("Idempotency guard: blocked duplicate user message: '%s'", cleaned[:40])
+        return False
+
+    msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+    msgs.append({
+        "id": msg_id,
+        "role": "user",
+        "content": cleaned,
+        "agent_name": None,
+    })
+    st.session_state["message_history"] = msgs
+    return True
+
+
+def append_assistant_message(content: str, agent_name: str = "General") -> bool:
+    """
+    Safely append an assistant message to message_history with idempotency.
+    """
+    cleaned = clean_markdown_content(str(content or "")).strip()
+    if not cleaned:
+        return False
+
+    msgs = st.session_state.setdefault("message_history", [])
+
+    # Idempotency guard: block consecutive duplicate assistant messages
+    if msgs and msgs[-1].get("role") == "assistant" and msgs[-1].get("content") == cleaned:
+        logger.warning("Idempotency guard: blocked duplicate assistant message: '%s'", cleaned[:40])
+        return False
+
+    msg_id = f"msg_{uuid.uuid4().hex[:12]}"
+    msgs.append({
+        "id": msg_id,
+        "role": "assistant",
+        "content": cleaned,
+        "agent_name": agent_name,
+    })
+    st.session_state["message_history"] = msgs
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Session Initialisation
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -114,6 +182,49 @@ def _init_session():
     tid = st.session_state["thread_id"]
     if tid not in st.session_state["thread_titles"]:
         st.session_state["thread_titles"][tid] = "New Chat"
+
+    # Streaming states
+    if "_is_generating" not in st.session_state:
+        st.session_state["_is_generating"] = False
+    if "_current_stream_text" not in st.session_state:
+        st.session_state["_current_stream_text"] = ""
+    if "_current_stream_agent" not in st.session_state:
+        st.session_state["_current_stream_agent"] = "General"
+
+    # Auto-restore thread messages if thread exists but message_history is empty
+    if not st.session_state["message_history"]:
+        try:
+            cfg = make_config(_uid, tid)
+            state = chatbot.get_state(config=cfg)
+            raw = state.values.get("messages", [])
+            if raw:
+                restored = []
+                for m in raw:
+                    if isinstance(m, HumanMessage):
+                        c = clean_markdown_content(str(m.content or "")).strip()
+                        if c and (not restored or restored[-1].get("role") != "user" or restored[-1].get("content") != c):
+                            restored.append({
+                                "id": getattr(m, "id", None) or f"msg_{uuid.uuid4().hex[:12]}",
+                                "role": "user",
+                                "content": c,
+                                "agent_name": None,
+                            })
+                    elif isinstance(m, AIMessage) and m.content:
+                        tool_calls = getattr(m, "tool_calls", [])
+                        c = clean_markdown_content(str(m.content or "")).strip()
+                        if tool_calls and not c:
+                            continue
+                        if c and (not restored or restored[-1].get("role") != "assistant" or restored[-1].get("content") != c):
+                            agent = state.values.get("agent_name", "General")
+                            restored.append({
+                                "id": getattr(m, "id", None) or f"msg_{uuid.uuid4().hex[:12]}",
+                                "role": "assistant",
+                                "content": c,
+                                "agent_name": agent,
+                            })
+                st.session_state["message_history"] = restored
+        except Exception as exc:
+            logger.debug("Could not auto-restore session messages: %s", exc)
 
     # Documents indexed in this session {composite_key: [metadata]}
     if "session_docs" not in st.session_state:
@@ -477,27 +588,143 @@ def get_theme_css(theme: str) -> str:
     [data-testid="stChatMessage"] {{
         background: transparent !important;
         border: none !important;
-        padding: 6px 0 !important;
+        padding: 4px 0 !important;
     }}
-    /* Assistant message bubble — clean card surface */
-    [data-testid="stChatMessage"]:not(:has([data-testid="stChatMessageAvatar"])) {{
+
+    /* Assistant message bubble — clean, spacious card surface */
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]),
+    [data-testid="stChatMessage"]:not(:has([data-testid="chatAvatarIcon-user"])) {{
+        max-width: 98% !important;
+        margin-right: auto !important;
+        padding: 4px 0 !important;
+    }}
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) [data-testid="stChatMessageContent"],
+    [data-testid="stChatMessage"]:not(:has([data-testid="chatAvatarIcon-user"])) [data-testid="stChatMessageContent"] {{
         background: {card_bg} !important;
         border: 1px solid {border_color} !important;
-        border-radius: 16px !important;
-        padding: 16px !important;
-        box-shadow: 0 2px 8px {shadow_card} !important;
+        border-radius: 4px 18px 18px 18px !important;
+        padding: 16px 20px !important;
+        box-shadow: 0 4px 16px {shadow_card} !important;
+        color: {text_main} !important;
+        font-size: 14.5px !important;
+        line-height: 1.65 !important;
     }}
-    /* User message bubble — warm peach/orange tint */
+
+    /* User message bubble — compact, right-aligned speech card */
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]),
     .stChatMessage.user,
     [data-testid="stChatMessage"][class*="user"],
     [data-testid="stChatMessage"][data-testid*="user"] {{
+        flex-direction: row-reverse !important;
+        margin-left: auto !important;
+        max-width: 78% !important;
+        padding: 4px 0 !important;
+    }}
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stChatMessageContent"],
+    .stChatMessage.user [data-testid="stChatMessageContent"],
+    [data-testid="stChatMessage"][class*="user"] [data-testid="stChatMessageContent"] {{
         background: {user_bubble} !important;
         border: 1px solid {user_border} !important;
-        border-radius: 16px !important;
-        padding: 16px !important;
+        border-radius: 18px 4px 18px 18px !important;
+        padding: 10px 16px !important;
         color: {text_main} !important;
-        box-shadow: 0 2px 8px {shadow_card} !important;
+        box-shadow: 0 2px 10px {shadow_card} !important;
+        font-size: 14.5px !important;
+        line-height: 1.55 !important;
+        width: auto !important;
     }}
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) p {{
+        margin-bottom: 0 !important;
+        color: {text_main} !important;
+    }}
+
+    /* Compact edit button for user message */
+    .user-edit-btn > button {{
+        background: transparent !important;
+        border: 1px solid transparent !important;
+        color: {btn_action} !important;
+        font-size: 11px !important;
+        padding: 2px 8px !important;
+        border-radius: 6px !important;
+        min-height: 0 !important;
+        line-height: 1.2 !important;
+        transition: all 0.15s ease !important;
+        margin-top: 2px !important;
+    }}
+    .user-edit-btn > button:hover {{
+        color: {primary} !important;
+        background: {user_bubble} !important;
+        border-color: {user_border} !important;
+    }}
+
+    /* ── Typography & HTML elements in responses ─────────────────────── */
+    [data-testid="stChatMessageContent"] h1,
+    [data-testid="stChatMessageContent"] h2,
+    [data-testid="stChatMessageContent"] h3,
+    [data-testid="stChatMessageContent"] h4 {{
+        color: {text_main} !important;
+        font-weight: 700 !important;
+        margin-top: 14px !important;
+        margin-bottom: 8px !important;
+        line-height: 1.3 !important;
+    }}
+    [data-testid="stChatMessageContent"] p {{
+        margin-bottom: 10px !important;
+        line-height: 1.65 !important;
+    }}
+    [data-testid="stChatMessageContent"] ul,
+    [data-testid="stChatMessageContent"] ol {{
+        margin-bottom: 12px !important;
+        padding-left: 24px !important;
+    }}
+    [data-testid="stChatMessageContent"] li {{
+        margin-bottom: 4px !important;
+        line-height: 1.6 !important;
+    }}
+    [data-testid="stChatMessageContent"] table {{
+        width: 100% !important;
+        border-collapse: collapse !important;
+        margin: 12px 0 !important;
+        font-size: 13.5px !important;
+    }}
+    [data-testid="stChatMessageContent"] th {{
+        background: {card_bg_alt} !important;
+        border: 1px solid {border_color} !important;
+        padding: 8px 12px !important;
+        font-weight: 600 !important;
+        text-align: left !important;
+        color: {primary} !important;
+    }}
+    [data-testid="stChatMessageContent"] td {{
+        border: 1px solid {border_color} !important;
+        padding: 8px 12px !important;
+        color: {text_main} !important;
+    }}
+    [data-testid="stChatMessageContent"] blockquote {{
+        border-left: 3px solid {primary} !important;
+        background: {card_bg_alt} !important;
+        padding: 8px 14px !important;
+        border-radius: 0 8px 8px 0 !important;
+        margin: 10px 0 !important;
+        color: {text_muted} !important;
+        font-style: italic !important;
+    }}
+
+    /* ── Thinking Indicator Animation ────────────────────────────────── */
+    @keyframes pulse-dot {{
+        0%, 100% {{ transform: scale(0.85); opacity: 0.5; }}
+        50% {{ transform: scale(1.2); opacity: 1; }}
+    }}
+    .thinking-dot {{
+        width: 8px;
+        height: 8px;
+        background: linear-gradient(135deg, {primary}, {primary_coral});
+        border-radius: 50%;
+        display: inline-block;
+        animation: pulse-dot 1.2s infinite ease-in-out;
+    }}
+    .thinking-dot:nth-child(2) {{ animation-delay: 0.2s; }}
+    .thinking-dot:nth-child(3) {{ animation-delay: 0.4s; }}
 
     /* ── Code blocks & syntax highlighting ───────────────────────────── */
     code {{
@@ -651,21 +878,36 @@ def get_theme_css(theme: str) -> str:
         border: 1.5px solid {chat_input_border} !important;
         border-radius: 16px !important;
         color: {text_main} !important;
-        transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+        transition: all 0.2s ease !important;
+        box-shadow: 0 4px 18px {shadow_card} !important;
+    }}
+    [data-testid="stChatInput"]:hover {{
+        border-color: {accent} !important;
     }}
     [data-testid="stChatInput"]:focus-within {{
         border-color: {primary} !important;
-        box-shadow: 0 0 0 3px rgba(255,107,53,0.14) !important;
+        box-shadow: 0 0 0 3px rgba(255,107,53,0.22), 0 6px 24px {shadow_primary} !important;
     }}
     [data-testid="stChatInput"] textarea {{
         background: transparent !important;
         color: {text_main} !important;
+        font-size: 14px !important;
     }}
     [data-testid="stChatInput"] button {{
         background: linear-gradient(135deg, {primary}, {primary_coral}) !important;
         border-radius: 10px !important;
         color: white !important;
         border: none !important;
+        transition: all 0.18s ease !important;
+    }}
+    [data-testid="stChatInput"] button:hover {{
+        transform: scale(1.05) !important;
+        filter: brightness(1.08) !important;
+    }}
+    [data-testid="stChatInput"] button:disabled {{
+        background: {btn_action} !important;
+        opacity: 0.5 !important;
+        cursor: not-allowed !important;
     }}
 
     /* ── Status / tool indicator ─────────────────────────────────────── */
@@ -802,7 +1044,7 @@ def new_chat():
 
 
 def switch_thread(tid: str):
-    """Switch to an existing thread and restore its messages."""
+    """Switch to an existing thread and restore its messages without duplication."""
     st.session_state["thread_id"] = tid
     st.session_state["_active_doubt"] = None
     # Load from LangGraph checkpointer
@@ -813,10 +1055,27 @@ def switch_thread(tid: str):
         restored = []
         for msg in raw_msgs:
             if isinstance(msg, HumanMessage):
-                restored.append({"role": "user", "content": msg.content, "agent_name": None})
+                c = clean_markdown_content(str(msg.content or "")).strip()
+                if c and (not restored or restored[-1].get("role") != "user" or restored[-1].get("content") != c):
+                    restored.append({
+                        "id": getattr(msg, "id", None) or f"msg_{uuid.uuid4().hex[:12]}",
+                        "role": "user",
+                        "content": c,
+                        "agent_name": None,
+                    })
             elif isinstance(msg, AIMessage) and msg.content:
-                agent = state.values.get("agent_name", "General")
-                restored.append({"role": "assistant", "content": msg.content, "agent_name": agent})
+                tool_calls = getattr(msg, "tool_calls", [])
+                c = clean_markdown_content(str(msg.content or "")).strip()
+                if tool_calls and not c:
+                    continue
+                if c and (not restored or restored[-1].get("role") != "assistant" or restored[-1].get("content") != c):
+                    agent = state.values.get("agent_name", "General")
+                    restored.append({
+                        "id": getattr(msg, "id", None) or f"msg_{uuid.uuid4().hex[:12]}",
+                        "role": "assistant",
+                        "content": c,
+                        "agent_name": agent,
+                    })
         st.session_state["message_history"] = restored
     except Exception as exc:
         logger.warning("Could not restore thread %s: %s", tid, exc)
@@ -1210,7 +1469,12 @@ else:
 trigger_regen = st.session_state.pop("_trigger_regen", None)
 trigger_edit = st.session_state.pop("_trigger_edit", None)
 trigger_card = st.session_state.pop("_trigger_card_prompt", None)
-user_input = st.chat_input("Ask anything about research, documents, code, or general questions...")
+
+is_generating = st.session_state.get("_is_generating", False)
+user_input = st.chat_input(
+    "Ask anything about research, documents, code, or general questions...",
+    disabled=is_generating,
+)
 
 prompt_to_stream = None
 is_regeneration = False
@@ -1221,7 +1485,7 @@ if trigger_regen:
 elif trigger_edit:
     prompt_to_stream = trigger_edit
     is_regeneration = False
-    message_history.append({"role": "user", "content": prompt_to_stream, "agent_name": None})
+    append_user_message(prompt_to_stream)
 elif trigger_card:
     prompt_to_stream = trigger_card
     is_regeneration = False
@@ -1232,18 +1496,20 @@ elif trigger_card:
             save_thread_title(user_id, thread_id, auto_t)
         except Exception:
             pass
-    message_history.append({"role": "user", "content": prompt_to_stream, "agent_name": None})
-elif user_input:
-    prompt_to_stream = user_input
-    is_regeneration = False
-    if not message_history:
-        auto_t = auto_title(user_input)
-        st.session_state["thread_titles"][thread_id] = auto_t
-        try:
-            save_thread_title(user_id, thread_id, auto_t)
-        except Exception:
-            pass
-    message_history.append({"role": "user", "content": user_input, "agent_name": None})
+    append_user_message(prompt_to_stream)
+elif user_input and not is_generating:
+    cleaned_input = clean_markdown_content(user_input).strip()
+    if cleaned_input:
+        prompt_to_stream = cleaned_input
+        is_regeneration = False
+        if not message_history:
+            auto_t = auto_title(cleaned_input)
+            st.session_state["thread_titles"][thread_id] = auto_t
+            try:
+                save_thread_title(user_id, thread_id, auto_t)
+            except Exception:
+                pass
+        append_user_message(cleaned_input)
 
 # ── Render Main Chat Column ──
 with col_main:
@@ -1328,12 +1594,10 @@ with col_main:
         partial_text = st.session_state.get("_current_stream_text", "").strip()
         partial_agent = st.session_state.get("_current_stream_agent", "General")
         if partial_text:
-            message_history.append({
-                "role": "assistant",
-                "content": partial_text + "\n\n*(Generation stopped by user)*",
-                "agent_name": partial_agent,
-            })
-            st.session_state["message_history"] = message_history
+            append_assistant_message(
+                partial_text + "\n\n*(Generation stopped by user)*",
+                agent_name=partial_agent,
+            )
         st.session_state["_current_stream_text"] = ""
         st.toast("⏹️ Generation stopped.")
 
@@ -1346,7 +1610,7 @@ with col_main:
 
     for idx, msg in enumerate(message_history):
         role = msg["role"]
-        content = msg["content"]
+        content = clean_markdown_content(msg.get("content", ""))
         agent_name = msg.get("agent_name")
 
         with st.chat_message(role):
@@ -1355,9 +1619,9 @@ with col_main:
             st.markdown(content)
 
             if role == "user":
-                col_u, _ = st.columns([0.15, 0.85])
-                with col_u:
-                    st.markdown('<div class="msg-action-btn">', unsafe_allow_html=True)
+                col_u_space, col_u_edit = st.columns([0.88, 0.12])
+                with col_u_edit:
+                    st.markdown('<div class="user-edit-btn">', unsafe_allow_html=True)
                     if st.button("✏️ Edit", key=f"edit_btn_{idx}", help="Edit this message and re-branch the conversation"):
                         st.session_state["_edit_msg_idx"] = idx
                         st.session_state["_edit_msg_content"] = content
@@ -1463,15 +1727,11 @@ with col_main:
                     f"✅ **{pending_filename}** is uploaded and ready.\n\n"
                     "Try asking: *What is the main topic?* or *Summarize the key findings.*"
                 )
+            confirmation = clean_markdown_content(confirmation)
             with st.chat_message("assistant"):
                 st.markdown(render_agent_badge("RAG"), unsafe_allow_html=True)
                 st.markdown(confirmation)
-            message_history.append({
-                "role": "assistant",
-                "content": confirmation,
-                "agent_name": "RAG",
-            })
-            st.session_state["message_history"] = message_history
+            append_assistant_message(confirmation, agent_name="RAG")
             st.stop()
 
         st.session_state["pending_upload_confirmation"] = None
@@ -1490,7 +1750,15 @@ with col_main:
             badge_placeholder = st.empty()
             thinking_placeholder = st.empty()
             thinking_placeholder.markdown(
-                '<span style="color:#FF8066; font-size:13px; font-weight:500;">🧭 Thinking…</span>', unsafe_allow_html=True
+                """
+                <div style="display:flex; align-items:center; gap:8px; padding:6px 0;">
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                    <span class="thinking-dot"></span>
+                    <span style="color:#FF8066; font-size:13px; font-weight:600; margin-left:4px;">AI Assistant is thinking…</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
             st.session_state["_is_generating"] = True
@@ -1597,24 +1865,24 @@ with col_main:
             badge_placeholder.markdown(render_agent_badge(agent_name), unsafe_allow_html=True)
 
             if sources_holder["web"] or sources_holder["rag_sources"]:
-                with st.expander("🔗 Sources", expanded=False):
-                    for s in sources_holder["web"]:
-                        st.markdown(f"- [{s['title']}]({s['link']})")
-                    for src, pages in sources_holder["rag_sources"].items():
-                        ext = src.rsplit(".", 1)[-1].lower() if "." in src else ""
-                        icon = "📄" if ext == "pdf" else ("📑" if ext == "docx" else ("🗒️" if ext == "md" else "📝"))
-                        if pages:
-                            pages_str = ", ".join(f"p. {p}" for p in sorted(pages))
-                            st.markdown(f"- {icon} **{src}** ({pages_str})")
-                        else:
-                            st.markdown(f"- {icon} **{src}**")
+                with st.expander(f"📚 Sources & Citations ({len(sources_holder['web']) + len(sources_holder['rag_sources'])})", expanded=False):
+                    if sources_holder["web"]:
+                        st.markdown("<div style='font-size:11px; font-weight:700; color:#FF8066; text-transform:uppercase; margin-bottom:6px;'>🌐 Web Sources</div>", unsafe_allow_html=True)
+                        for s in sources_holder["web"]:
+                            st.markdown(f"- [{s['title']}]({s['link']})")
+                    if sources_holder["rag_sources"]:
+                        st.markdown("<div style='font-size:11px; font-weight:700; color:#FF8066; text-transform:uppercase; margin-top:8px; margin-bottom:6px;'>📄 Document Passages</div>", unsafe_allow_html=True)
+                        for src, pages in sources_holder["rag_sources"].items():
+                            ext = src.rsplit(".", 1)[-1].lower() if "." in src else ""
+                            icon = "📄" if ext == "pdf" else ("📑" if ext == "docx" else ("🗒️" if ext == "md" else "📝"))
+                            if pages:
+                                pages_str = ", ".join(f"page {p}" for p in sorted(pages))
+                                st.markdown(f"- {icon} **{src}** ({pages_str})")
+                            else:
+                                st.markdown(f"- {icon} **{src}**")
 
-        message_history.append({
-            "role": "assistant",
-            "content": ai_response or "",
-            "agent_name": agent_name,
-        })
-        st.session_state["message_history"] = message_history
+        clean_ai_response = clean_markdown_content(ai_response or "")
+        append_assistant_message(clean_ai_response, agent_name=agent_name)
         st.rerun()
 
 # ── Render Right-Side Contextual Doubt Window (Task 5) ──

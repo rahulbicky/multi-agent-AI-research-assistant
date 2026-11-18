@@ -60,6 +60,11 @@ class Settings:
         default_factory=lambda: os.getenv("DB_PATH", "chatbot.db")
     )
 
+    # ── Persistent Vector Store ──────────────────────────────────────────────
+    vector_store_dir: str = field(
+        default_factory=lambda: os.getenv("VECTOR_STORE_DIR", "data/vector_stores")
+    )
+
     # ── Alpha Vantage (optional) ─────────────────────────────────────────────
     alphavantage_api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("ALPHAVANTAGE_API_KEY") or None
@@ -111,6 +116,7 @@ class Settings:
         logger.info("Configuration validated successfully.")
         logger.info("Groq model: %s", self.groq_model)
         logger.info("Database: %s", self.db_path)
+        logger.info("Vector store directory: %s", self.vector_store_dir)
         logger.info("MCP enabled: %s, URL: %s", self.mcp_enabled, self.mcp_server_url)
         logger.info(
             "Alpha Vantage stock tool: %s",

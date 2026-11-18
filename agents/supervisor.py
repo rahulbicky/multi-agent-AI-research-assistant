@@ -54,9 +54,9 @@ Your ONLY job is to classify the user's message into exactly one of these catego
                • any fact that may have changed recently
                • anything with words: current, latest, recent, now, today, new, 2024, 2025, 2026
 
-  rag       - Questions about an uploaded document, PDF, or file.
-               Signals: "the document", "the PDF", "the file", "according to",
-               "in the report", "what does it say", "summarize the PDF".
+  rag       - Questions about an uploaded document, PDF, Word doc, text file, notes, or file.
+               Signals: "the document", "the PDF", "the docx", "in the file", "in the notes",
+               "according to", "in the report", "what does it say", "summarize".
 
   coding    - Programming, code generation, debugging, algorithms, technical
                implementation, any question involving writing or reading code.

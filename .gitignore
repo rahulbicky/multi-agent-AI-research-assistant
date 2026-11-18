@@ -160,6 +160,7 @@ venv.bak/
 # Local application state and databases
 chatbot.db
 chatbot.db-*
+data/
 
 # Local Streamlit secrets
 .streamlit/secrets.toml
@@ -223,3 +224,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Scratch test files
+scratch/

@@ -58,15 +58,24 @@ def _ensure_title_table(conn: sqlite3.Connection) -> None:
     ------
     composite_thread_id  TEXT  PRIMARY KEY  — "{user_id}:{thread_id}"
     title                TEXT  NOT NULL     — human-readable conversation name
+    updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS thread_titles (
             composite_thread_id TEXT PRIMARY KEY,
-            title               TEXT NOT NULL
+            title               TEXT NOT NULL,
+            updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    try:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(thread_titles)").fetchall()]
+        if "updated_at" not in cols:
+            conn.execute("ALTER TABLE thread_titles ADD COLUMN updated_at TIMESTAMP")
+            conn.execute("UPDATE thread_titles SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
+    except Exception as exc:
+        logger.warning("Column migration note for thread_titles: %s", exc)
     conn.commit()
 
 
@@ -175,11 +184,29 @@ def save_thread_title(user_id: str, thread_id: str, title: str) -> None:
     conn = _get_connection()
     _ensure_title_table(conn)
     conn.execute(
-        "INSERT OR REPLACE INTO thread_titles (composite_thread_id, title) VALUES (?, ?)",
+        """
+        INSERT INTO thread_titles (composite_thread_id, title, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(composite_thread_id) DO UPDATE SET
+            title = excluded.title,
+            updated_at = CURRENT_TIMESTAMP
+        """,
         (composite, title),
     )
     conn.commit()
     logger.info("Saved title for %s: %r", composite, title)
+
+
+def touch_thread(user_id: str, thread_id: str) -> None:
+    """Update the updated_at timestamp for a conversation thread."""
+    composite = f"{user_id}:{thread_id}"
+    conn = _get_connection()
+    _ensure_title_table(conn)
+    conn.execute(
+        "UPDATE thread_titles SET updated_at = CURRENT_TIMESTAMP WHERE composite_thread_id = ?",
+        (composite,),
+    )
+    conn.commit()
 
 
 def get_thread_title(user_id: str, thread_id: str) -> str | None:
@@ -200,13 +227,18 @@ def get_thread_title(user_id: str, thread_id: str) -> str | None:
 def load_all_thread_titles(user_id: str) -> dict[str, str]:
     """
     Return a mapping of ``{thread_id: title}`` for every thread that has a
-    persisted title for this user.
+    persisted title for this user, ordered by most recently updated.
     """
     prefix = f"{user_id}:"
     conn = _get_connection()
     _ensure_title_table(conn)
     rows = conn.execute(
-        "SELECT composite_thread_id, title FROM thread_titles WHERE composite_thread_id LIKE ?",
+        """
+        SELECT composite_thread_id, title
+        FROM thread_titles
+        WHERE composite_thread_id LIKE ?
+        ORDER BY updated_at DESC
+        """,
         (f"{prefix}%",),
     ).fetchall()
     result: dict[str, str] = {}
@@ -214,6 +246,35 @@ def load_all_thread_titles(user_id: str) -> dict[str, str]:
         if composite.startswith(prefix):
             tid = composite[len(prefix):]
             result[tid] = title
+    return result
+
+
+def load_all_threads_detailed(user_id: str) -> list[dict]:
+    """
+    Return all threads for a user ordered by updated_at descending.
+    Each item is: {"thread_id": tid, "title": title, "updated_at": str}
+    """
+    prefix = f"{user_id}:"
+    conn = _get_connection()
+    _ensure_title_table(conn)
+    rows = conn.execute(
+        """
+        SELECT composite_thread_id, title, COALESCE(updated_at, CURRENT_TIMESTAMP)
+        FROM thread_titles
+        WHERE composite_thread_id LIKE ?
+        ORDER BY updated_at DESC
+        """,
+        (f"{prefix}%",),
+    ).fetchall()
+    result = []
+    for composite, title, updated_at in rows:
+        if composite.startswith(prefix):
+            tid = composite[len(prefix):]
+            result.append({
+                "thread_id": tid,
+                "title": title,
+                "updated_at": str(updated_at),
+            })
     return result
 
 

@@ -18,6 +18,7 @@ import logging
 import re
 import sys
 import uuid
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 # `core/`, `agents/` and `tools/` live at the project root, one level above
@@ -37,8 +38,10 @@ from core.memory import (
     list_user_threads,
     make_config,
     save_thread_title,
+    touch_thread,
     get_thread_title,
     load_all_thread_titles,
+    load_all_threads_detailed,
     delete_thread,
     search_user_threads,
     get_user_setting,
@@ -84,6 +87,44 @@ def clean_markdown_content(text: str) -> str:
     if not isinstance(text, str):
         return ""
     return re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+
+
+def group_threads_by_date(threads: list[dict]) -> dict[str, list[dict]]:
+    """
+    Group detailed threads into 'Today', 'Yesterday', 'Previous 7 Days', 'Older'.
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    seven_days_ago = today - timedelta(days=7)
+
+    groups: dict[str, list[dict]] = {
+        "Today": [],
+        "Yesterday": [],
+        "Previous 7 Days": [],
+        "Older": [],
+    }
+
+    for item in threads:
+        ts_str = item.get("updated_at", "")
+        item_date = today
+        if ts_str:
+            try:
+                cleaned_ts = str(ts_str).replace("T", " ")[:19]
+                dt = datetime.strptime(cleaned_ts, "%Y-%m-%d %H:%M:%S")
+                item_date = dt.date()
+            except Exception:
+                item_date = today
+
+        if item_date == today:
+            groups["Today"].append(item)
+        elif item_date == yesterday:
+            groups["Yesterday"].append(item)
+        elif item_date >= seven_days_ago:
+            groups["Previous 7 Days"].append(item)
+        else:
+            groups["Older"].append(item)
+
+    return {k: v for k, v in groups.items() if v}
 
 
 def append_user_message(content: str) -> bool:
@@ -176,8 +217,6 @@ def _init_session():
 
     # Register current thread if not already tracked
     tid = st.session_state["thread_id"]
-    if tid not in st.session_state["thread_titles"]:
-        st.session_state["thread_titles"][tid] = "New Chat"
 
     # Streaming states
     if "_is_generating" not in st.session_state:
@@ -194,6 +233,8 @@ def _init_session():
             state = chatbot.get_state(config=cfg)
             raw = state.values.get("messages", [])
             if raw:
+                if tid not in st.session_state["thread_titles"]:
+                    st.session_state["thread_titles"][tid] = get_thread_title(_uid, tid) or "Chat"
                 restored = []
                 for m in raw:
                     if isinstance(m, HumanMessage):
@@ -583,33 +624,33 @@ def get_theme_css(theme: str) -> str:
     [data-testid="stChatMessage"] {{
         background: transparent !important;
         border: none !important;
-        padding: 5px 0 !important;
-        margin-bottom: 5px !important;
+        padding: 3px 0 !important;
+        margin-bottom: 3px !important;
     }}
 
-    /* Assistant messages stay open and readable without a card surface. */
+    /* Assistant messages: left-aligned compact card container with consistent padding */
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]),
     [data-testid="stChatMessage"]:not(:has([data-testid="chatAvatarIcon-user"])) {{
         width: 100% !important;
         max-width: 100% !important;
         margin-right: auto !important;
-        padding: 6px 0 !important;
+        padding: 3px 0 !important;
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) [data-testid="stChatMessageContent"],
     [data-testid="stChatMessage"]:not(:has([data-testid="chatAvatarIcon-user"])) [data-testid="stChatMessageContent"] {{
         width: 100% !important;
-        max-width: 840px !important;
-        background: transparent !important;
-        border: none !important;
-        border-radius: 0 !important;
-        padding: 0 !important;
-        box-shadow: none !important;
+        max-width: 860px !important;
+        background: {card_bg} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 4px 18px 18px 18px !important;
+        padding: 14px 18px !important;
+        box-shadow: 0 2px 10px {shadow_card} !important;
         color: {text_main} !important;
-        font-size: 15px !important;
-        line-height: 1.7 !important;
+        font-size: 14.5px !important;
+        line-height: 1.65 !important;
     }}
 
-    /* User messages use a text-sized bubble aligned to the right. */
+    /* User messages: right-aligned compact speech bubble */
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]),
     .stChatMessage.user,
     [data-testid="stChatMessage"][class*="user"],
@@ -618,8 +659,8 @@ def get_theme_css(theme: str) -> str:
         justify-content: flex-start !important;
         width: 100% !important;
         max-width: 100% !important;
-        margin: 0 0 5px auto !important;
-        padding: 4px 0 !important;
+        margin: 2px 0 2px auto !important;
+        padding: 3px 0 !important;
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stChatMessageContent"],
     .stChatMessage.user [data-testid="stChatMessageContent"],
@@ -637,7 +678,7 @@ def get_theme_css(theme: str) -> str:
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdown"] {{
         width: fit-content !important;
-        max-width: min(78%, 680px) !important;
+        max-width: min(75%, 660px) !important;
         align-self: flex-end !important;
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdownContainer"] {{
@@ -645,12 +686,12 @@ def get_theme_css(theme: str) -> str:
         max-width: 100% !important;
         background: {user_bubble} !important;
         border: 1px solid {user_border} !important;
-        border-radius: 18px 5px 18px 18px !important;
-        padding: 9px 14px !important;
+        border-radius: 18px 4px 18px 18px !important;
+        padding: 9px 15px !important;
         color: {text_main} !important;
         box-shadow: 0 2px 8px {shadow_card} !important;
         font-size: 14px !important;
-        line-height: 1.55 !important;
+        line-height: 1.5 !important;
     }}
     [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) [data-testid="stMarkdownContainer"] p {{
         margin-bottom: 0 !important;
@@ -668,12 +709,25 @@ def get_theme_css(theme: str) -> str:
         min-height: 0 !important;
         line-height: 1.2 !important;
         transition: all 0.15s ease !important;
-        margin-top: 2px !important;
+        margin-top: 1px !important;
     }}
     .user-edit-btn > button:hover {{
         color: {primary} !important;
         background: {user_bubble} !important;
         border-color: {user_border} !important;
+    }}
+
+    /* Minimize gaps in action rows */
+    [data-testid="stChatMessage"] [data-testid="stHorizontalBlock"] {{
+        margin-top: 3px !important;
+        margin-bottom: 0 !important;
+        padding: 0 !important;
+        min-height: 0 !important;
+        gap: 6px !important;
+    }}
+    [data-testid="stChatMessage"] [data-testid="stColumn"] {{
+        padding: 0 !important;
+        min-height: 0 !important;
     }}
 
     /* ── Typography & HTML elements in responses ─────────────────────── */
@@ -919,57 +973,57 @@ def get_theme_css(theme: str) -> str:
         cursor: not-allowed !important;
     }}
 
+    /* ── Bottom fixed chat input container ───────────────────────────── */
+    [data-testid="stBottom"] {{
+        background: {bg_main} !important;
+        padding-bottom: 0.85rem !important;
+        padding-top: 0.5rem !important;
+        z-index: 50 !important;
+        border-top: 1px solid transparent !important;
+    }}
+    [data-testid="stBottom"] > div {{
+        max-width: {max_w} !important;
+        margin: 0 auto !important;
+        transition: max-width 0.25s ease !important;
+    }}
+
     /* ── Contextual doubt layout ─────────────────────────────────────── */
-    [data-testid="stHorizontalBlock"]:has(.chat-scroll-marker) {{
+    [data-testid="stHorizontalBlock"]:has(.doubt-panel-anchor) {{
         align-items: flex-start !important;
-        gap: 1rem !important;
+        gap: 1.25rem !important;
     }}
     [data-testid="stColumn"]:has(.chat-scroll-marker) {{
         min-width: 0 !important;
     }}
-    [data-testid="stColumn"]:has(.chat-scroll-marker) > [data-testid="stVerticalBlock"] {{
-        height: calc(100dvh - 6rem) !important;
-        max-height: calc(100dvh - 6rem) !important;
-        overflow-y: auto !important;
-        overscroll-behavior: contain !important;
-        scrollbar-gutter: stable;
-    }}
     [data-testid="stColumn"]:has(.doubt-panel-anchor) {{
-        position: fixed !important;
-        top: 0.75rem !important;
-        right: 1rem !important;
-        width: clamp(300px, calc((100vw - 320px) * 0.52), 560px) !important;
-        bottom: max(7.5rem, env(safe-area-inset-bottom)) !important;
-        height: auto !important;
-        min-width: 0 !important;
-        z-index: 20 !important;
-    }}
-    [data-testid="stColumn"]:has(.doubt-panel-anchor) > [data-testid="stVerticalBlock"] {{
-        height: 100% !important;
-        max-height: 100% !important;
-        overflow-y: auto !important;
-        overscroll-behavior: contain !important;
-        scrollbar-gutter: stable;
+        background: {card_bg} !important;
+        border: 1px solid rgba(255,107,53,0.3) !important;
+        border-radius: 16px !important;
+        padding: 14px 16px !important;
+        box-shadow: 0 4px 22px {shadow_card} !important;
+        position: sticky !important;
+        top: 1rem !important;
+        height: fit-content !important;
+        min-width: 270px !important;
+        transition: all 0.22s ease !important;
     }}
     .st-key-doubt-panel-header {{
-        position: sticky !important;
-        top: 0 !important;
-        z-index: 5 !important;
-        background: {bg_main} !important;
-        padding: 8px 0 !important;
-        border-bottom: 1px solid {border_color} !important;
+        padding-bottom: 8px !important;
+        border-bottom: 1px solid rgba(255,107,53,0.2) !important;
+        margin-bottom: 8px !important;
     }}
     .st-key-doubt-chat-history {{
+        background: {card_bg_alt} !important;
+        border: 1px solid {border_color} !important;
+        border-radius: 12px !important;
+        padding: 8px 10px !important;
         overscroll-behavior: contain !important;
         scrollbar-gutter: stable;
     }}
     .st-key-doubt-panel-form {{
-        position: sticky !important;
-        bottom: 0 !important;
-        z-index: 4 !important;
-        background: {bg_main} !important;
-        padding: 8px 0 !important;
-        border-top: 1px solid {border_color} !important;
+        margin-top: 8px !important;
+        padding-top: 8px !important;
+        border-top: 1px solid rgba(255,107,53,0.2) !important;
     }}
 
     /* ── Status / tool indicator ─────────────────────────────────────── */
@@ -1057,28 +1111,12 @@ def get_theme_css(theme: str) -> str:
         [data-testid="stHorizontalBlock"]:has(.doubt-panel-anchor) {{
             display: block !important;
         }}
-        [data-testid="stColumn"]:has(.chat-scroll-marker) {{
-            width: 100% !important;
-        }}
-        [data-testid="stColumn"]:has(.chat-scroll-marker) > [data-testid="stVerticalBlock"] {{
-            height: calc(100dvh - 6rem) !important;
-            max-height: calc(100dvh - 6rem) !important;
-        }}
         [data-testid="stColumn"]:has(.doubt-panel-anchor) {{
-            position: fixed !important;
-            inset: max(8px, env(safe-area-inset-top)) 8px max(7.5rem, env(safe-area-inset-bottom)) !important;
-            width: auto !important;
-            height: auto !important;
-            z-index: 1000 !important;
-            padding: 10px !important;
-            border: 1px solid {border_color} !important;
+            width: 100% !important;
+            margin-top: 1rem !important;
+            position: relative !important;
+            top: 0 !important;
             border-radius: 14px !important;
-            background: {bg_main} !important;
-            box-shadow: 0 12px 40px {shadow_card} !important;
-        }}
-        [data-testid="stColumn"]:has(.doubt-panel-anchor) > [data-testid="stVerticalBlock"] {{
-            height: 100% !important;
-            max-height: 100% !important;
         }}
     }}
     @media (max-width: 480px) {{
@@ -1129,11 +1167,13 @@ def tool_status_label(tool_name: str) -> str:
 
 def new_chat():
     """Start a fresh conversation thread."""
+    if not st.session_state.get("message_history"):
+        st.session_state["_active_doubt"] = None
+        return
     new_tid = str(uuid.uuid4())
     st.session_state["thread_id"] = new_tid
     st.session_state["message_history"] = []
     st.session_state["pending_upload_confirmation"] = None
-    st.session_state["thread_titles"][new_tid] = "New Chat"
     st.session_state["_active_doubt"] = None
 
 
@@ -1245,7 +1285,6 @@ def _delete_dialog():
                 new_tid = str(uuid.uuid4())
                 st.session_state["thread_id"] = new_tid
                 st.session_state["message_history"] = []
-                st.session_state["thread_titles"][new_tid] = "New Chat"
             st.session_state["_active_doubt"] = None
             st.session_state["_delete_tid"] = None
             st.session_state["_delete_title"] = None
@@ -1343,16 +1382,17 @@ with st.sidebar:
                 st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── New Chat ──
-    st.markdown('<div class="new-chat-btn" style="margin-top:10px;">', unsafe_allow_html=True)
-    if st.button("✏️  New Chat", use_container_width=True, key="new_chat_btn"):
+    # ── New Chat Button (Single modern button) ──
+    st.markdown('<div class="new-chat-btn" style="margin-top:10px; margin-bottom:12px;">', unsafe_allow_html=True)
+    if st.button("➕  New Chat", use_container_width=True, key="new_chat_btn"):
         new_chat()
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
+    # ── Chat History / Conversations (Grouped by Date) ──
+    st.markdown('<div class="sidebar-section">💬 Chat History</div>', unsafe_allow_html=True)
 
-    # ── Search Conversations ──
+    # Search Conversations
     search_query = st.text_input(
         "Search conversations",
         value=st.session_state.get("search_query", ""),
@@ -1362,7 +1402,71 @@ with st.sidebar:
     )
     st.session_state["search_query"] = search_query
 
-    # ── Document Upload ──
+    # Load detailed threads with updated_at timestamp
+    all_detailed = load_all_threads_detailed(user_id)
+    thread_titles = st.session_state["thread_titles"]
+
+    # Filter by search query if present
+    if search_query.strip():
+        matching_tids = set(search_user_threads(user_id, search_query))
+        filtered_threads = [t for t in all_detailed if t["thread_id"] in matching_tids]
+        st.caption(f"Found {len(filtered_threads)} match(es)")
+    else:
+        filtered_threads = all_detailed
+
+    if not filtered_threads:
+        msg = "No matching conversations found." if search_query.strip() else "No conversations yet. Start a New Chat!"
+        st.markdown(
+            f'<div style="color:#64748b;font-size:12px;padding:8px 4px;">{msg}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # Group into Today, Yesterday, Previous 7 Days, Older
+        grouped = group_threads_by_date(filtered_threads)
+        for group_label, group_items in grouped.items():
+            st.markdown(
+                f'<div style="font-size:10px;font-weight:700;color:#9E8E84;text-transform:uppercase;letter-spacing:1px;padding:6px 2px 2px;margin-top:4px;">{group_label}</div>',
+                unsafe_allow_html=True,
+            )
+            for item in group_items:
+                tid = item["thread_id"]
+                title = item.get("title") or thread_titles.get(tid, "Chat")
+                is_active = (tid == st.session_state["thread_id"])
+                display_title = f"▶ {title}" if is_active else title
+
+                col_title, col_rename, col_delete = st.columns([6, 1, 1])
+                with col_title:
+                    active_cls = "conv-active" if is_active else ""
+                    st.markdown(f'<div class="{active_cls}">', unsafe_allow_html=True)
+                    if st.button(display_title, key=f"thread_btn_{tid}", use_container_width=True):
+                        if not is_active:
+                            switch_thread(tid)
+                            st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+                with col_rename:
+                    st.markdown('<div class="conv-action-btn">', unsafe_allow_html=True)
+                    if st.button("✏️", key=f"rename_btn_{tid}", help="Rename conversation"):
+                        st.session_state["_rename_tid"] = tid
+                        st.session_state["_rename_current"] = title
+                    st.markdown('</div>', unsafe_allow_html=True)
+                with col_delete:
+                    st.markdown('<div class="conv-action-btn conv-delete-btn">', unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"delete_btn_{tid}", help="Delete conversation"):
+                        st.session_state["_delete_tid"] = tid
+                        st.session_state["_delete_title"] = title
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Trigger dialogs if requested
+    if st.session_state.get("_rename_tid"):
+        _rename_dialog()
+    if st.session_state.get("_delete_tid"):
+        _delete_dialog()
+    if st.session_state.get("_edit_msg_idx") is not None:
+        _edit_dialog()
+
+    st.markdown("---")
+
+    # ── Document Upload (Placed below Chat History) ──
     st.markdown('<div class="sidebar-section">📎 Document Upload</div>', unsafe_allow_html=True)
     uploaded_files = st.file_uploader(
         "Upload Documents",
@@ -1425,63 +1529,6 @@ with st.sidebar:
             icon = "📄" if ext == "pdf" else ("📑" if ext == "docx" else ("🗒️" if ext == "md" else "📝"))
             chunks = doc.get("chunks", 0)
             st.caption(f"{icon} **{fname}** ({chunks} chunks)")
-
-    st.markdown("---")
-
-    # ── Conversation History ──
-    st.markdown('<div class="sidebar-section">💬 Conversations</div>', unsafe_allow_html=True)
-
-    thread_titles = st.session_state["thread_titles"]
-    all_rev = list(reversed(list(thread_titles.keys())))
-
-    if search_query.strip():
-        matching_tids = search_user_threads(user_id, search_query)
-        sorted_threads = [t for t in all_rev if t in matching_tids]
-        st.caption(f"Found {len(sorted_threads)} match(es)")
-    else:
-        sorted_threads = all_rev
-
-    if not sorted_threads:
-        msg = "No matching conversations found." if search_query.strip() else "No conversations yet. Start a New Chat!"
-        st.markdown(
-            f'<div style="color:#64748b;font-size:12px;padding:8px 4px;">{msg}</div>',
-            unsafe_allow_html=True,
-        )
-
-    for tid in sorted_threads:
-        title = thread_titles.get(tid, "Chat")
-        is_active = tid == st.session_state["thread_id"]
-        display_title = f"▶ {title}" if is_active else title
-
-        col_title, col_rename, col_delete = st.columns([6, 1, 1])
-        with col_title:
-            active_cls = "conv-active" if is_active else ""
-            st.markdown(f'<div class="{active_cls}">', unsafe_allow_html=True)
-            if st.button(display_title, key=f"thread_btn_{tid}", use_container_width=True):
-                if not is_active:
-                    switch_thread(tid)
-                    st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col_rename:
-            st.markdown('<div class="conv-action-btn">', unsafe_allow_html=True)
-            if st.button("✏️", key=f"rename_btn_{tid}", help="Rename conversation"):
-                st.session_state["_rename_tid"] = tid
-                st.session_state["_rename_current"] = thread_titles.get(tid, "")
-            st.markdown('</div>', unsafe_allow_html=True)
-        with col_delete:
-            st.markdown('<div class="conv-action-btn conv-delete-btn">', unsafe_allow_html=True)
-            if st.button("🗑️", key=f"delete_btn_{tid}", help="Delete conversation"):
-                st.session_state["_delete_tid"] = tid
-                st.session_state["_delete_title"] = thread_titles.get(tid, "Chat")
-            st.markdown('</div>', unsafe_allow_html=True)
-
-    # Trigger dialogs if requested
-    if st.session_state.get("_rename_tid"):
-        _rename_dialog()
-    if st.session_state.get("_delete_tid"):
-        _delete_dialog()
-    if st.session_state.get("_edit_msg_idx") is not None:
-        _edit_dialog()
 
     # ── Export Options ──
     if st.session_state.get("message_history"):
@@ -1554,7 +1601,7 @@ if active_doubt is not None:
 
 # Create side-by-side columns if contextual doubt window is open
 if active_doubt is not None:
-    col_main, col_doubt = st.columns([0.55, 0.45], gap="medium")
+    col_main, col_doubt = st.columns([0.67, 0.33], gap="medium")
 else:
     col_main = st.container()
     col_doubt = None
@@ -1573,6 +1620,7 @@ prompt_to_stream = None
 if trigger_edit:
     prompt_to_stream = trigger_edit
     append_user_message(prompt_to_stream)
+    touch_thread(user_id, thread_id)
 elif trigger_card:
     prompt_to_stream = trigger_card
     if not message_history:
@@ -1583,6 +1631,7 @@ elif trigger_card:
         except Exception:
             pass
     append_user_message(prompt_to_stream)
+    touch_thread(user_id, thread_id)
 elif user_input and not is_generating:
     cleaned_input = clean_markdown_content(user_input).strip()
     if cleaned_input:
@@ -1595,6 +1644,7 @@ elif user_input and not is_generating:
             except Exception:
                 pass
         append_user_message(cleaned_input)
+        touch_thread(user_id, thread_id)
 
 # ── Render Main Chat Column ──
 with col_main:
@@ -1716,7 +1766,7 @@ with col_main:
                     active_doubt is not None and active_doubt.get("message_index") == idx
                 )
                 doubt_cls = "doubt-btn-active" if is_doubt_active else "doubt-btn"
-                doubt_label = "💭 Active" if is_doubt_active else "💬 Ask Doubt"
+                doubt_label = "💭 Active Doubt" if is_doubt_active else "❓ Ask Doubt"
 
                 _, col_d = st.columns([0.72, 0.28])
                 with col_d:
@@ -1930,6 +1980,21 @@ with col_main:
         append_assistant_message(clean_ai_response, agent_name=agent_name)
         st.rerun()
 
+    # Smooth auto-scroll to bottom
+    st.markdown(
+        """
+        <script>
+            (function() {
+                const mainEl = window.parent.document.querySelector('[data-testid="stAppViewContainer"]') || window.parent.document.body;
+                if (mainEl) {
+                    mainEl.scrollTo({ top: mainEl.scrollHeight, behavior: 'smooth' });
+                }
+            })();
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+
 # ── Render Right-Side Contextual Doubt Window (Task 5) ──
 if col_doubt is not None and active_doubt is not None:
     with col_doubt:
@@ -1938,19 +2003,15 @@ if col_doubt is not None and active_doubt is not None:
         d_prompt = active_doubt.get("original_prompt", "")
         d_resp = active_doubt.get("original_response", "")
 
-        # Top Header Bar
+        # Top Header Bar - Clean heading "Ask Doubt" without internal IDs or technical metadata
         with st.container(key="doubt-panel-header", border=False):
             col_dh_title, col_dh_close = st.columns([0.84, 0.16])
             with col_dh_title:
                 st.markdown(
-                    f"""
-                    <div style="display:flex; align-items:center; gap:8px; margin-bottom:2px;">
+                    """
+                    <div style="display:flex; align-items:center; gap:8px;">
                         <span style="font-size:1.15rem;">💭</span>
                         <span style="font-weight:700; font-size:1.05rem; background: linear-gradient(135deg, #FF6B35, #FF8066); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">Ask Doubt</span>
-                        <span style="font-size:11px; background:rgba(255,107,53,0.15); color:#FF6B35; border:1px solid rgba(255,107,53,0.3); border-radius:6px; padding:2px 6px; font-weight:600;">Response #{d_idx + 1}</span>
-                    </div>
-                    <div style="font-size:11px; color:#9E8E84; margin-bottom:8px;">
-                        Ask targeted questions about this specific response
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -1962,39 +2023,23 @@ if col_doubt is not None and active_doubt is not None:
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
 
-        # Context Card
-        with st.expander("📌 Context Excerpt", expanded=False):
-            if d_prompt:
-                st.markdown(f"**Your Question:**\n> {d_prompt}")
-            resp_preview = d_resp[:280] + "…" if len(d_resp) > 280 else d_resp
-            st.markdown(f"**Original Response Excerpt:**\n> {resp_preview}")
-
-        # Retrieve doubt messages from SQLite
+        # Retrieve doubt messages from SQLite (original context d_prompt and d_resp preserved internally)
         doubt_messages = get_doubt_messages(user_id, thread_id, d_idx)
 
-        # Scrollable container for doubt conversation
-        doubt_container = st.container(height=240, key="doubt-chat-history")
+        # Compact scrollable container for doubt conversation
+        doubt_container = st.container(height=320, key="doubt-chat-history")
         with doubt_container:
             if not doubt_messages:
                 st.markdown(
                     """
-                    <div style="text-align:center; padding:28px 12px; color:#9E8E84; font-size:12.5px;">
-                        <div style="font-size:1.8rem; margin-bottom:8px;">🤔</div>
-                        <b>What would you like clarified?</b><br>
-                        Ask for an explanation of any concept, request an example, or ask to break it down step-by-step.
+                    <div style="text-align:center; padding:24px 10px; color:#9E8E84; font-size:12.5px;">
+                        <div style="font-size:1.6rem; margin-bottom:6px;">🤔</div>
+                        <b>Ask a follow-up doubt</b><br>
+                        Have a question about this response? Ask below and get an instant clarification without affecting the main chat.
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
-                q_c1, q_c2 = st.columns(2)
-                with q_c1:
-                    if st.button("💡 Simplify this", key="doubt_chip_simplify", use_container_width=True):
-                        st.session_state["_pending_doubt_query"] = "Can you simplify and explain the key point of this response in layman's terms?"
-                        st.rerun()
-                with q_c2:
-                    if st.button("📝 Give an example", key="doubt_chip_example", use_container_width=True):
-                        st.session_state["_pending_doubt_query"] = "Can you provide a concrete real-world example to illustrate this response?"
-                        st.rerun()
             else:
                 for d_msg in doubt_messages:
                     d_role = d_msg.get("role", "user")
@@ -2002,7 +2047,7 @@ if col_doubt is not None and active_doubt is not None:
                     with st.chat_message(d_role):
                         st.markdown(d_text)
 
-        # Clear doubt history button
+        # Clear doubt history button (if messages exist)
         if doubt_messages:
             col_d_clear, _ = st.columns([0.45, 0.55])
             with col_d_clear:
@@ -2012,28 +2057,21 @@ if col_doubt is not None and active_doubt is not None:
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
 
-        pending_doubt = st.session_state.pop("_pending_doubt_query", None)
-
         with st.container(key="doubt-panel-form", border=False):
             with st.form(key=f"doubt_form_{d_idx}", clear_on_submit=True):
-                f_col_in, f_col_btn = st.columns([0.68, 0.32])
+                f_col_in, f_col_btn = st.columns([0.72, 0.28])
                 with f_col_in:
                     new_doubt_text = st.text_input(
                         "Your doubt",
-                        placeholder="Ask a doubt about this response...",
+                        placeholder="Ask your doubt here...",
                         label_visibility="collapsed",
                         key=f"doubt_text_input_{d_idx}",
                     )
                 with f_col_btn:
-                    submit_doubt = st.form_submit_button("Ask ➔", type="primary", use_container_width=True)
+                    submit_doubt = st.form_submit_button("Send", type="primary", use_container_width=True)
 
-        query_to_process = None
         if submit_doubt and new_doubt_text and new_doubt_text.strip():
             query_to_process = new_doubt_text.strip()
-        elif pending_doubt:
-            query_to_process = pending_doubt
-
-        if query_to_process:
             add_doubt_message(user_id, thread_id, d_idx, "user", query_to_process)
             history_for_llm = get_doubt_messages(user_id, thread_id, d_idx)[:-1]
 

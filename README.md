@@ -25,10 +25,10 @@
 ## 📋 Table of Contents
 
 - [Project Overview](#-project-overview)
+- [⭐ Signature Feature: Contextual Doubt Window](#-signature-feature-contextual-doubt-window)
 - [Key Features](#-key-features)
   - [Multi-Agent Architecture](#multi-agent-ai-architecture)
   - [Advanced RAG Pipeline](#advanced-rag-pipeline)
-  - [Contextual Doubt Window](#-contextual-doubt-window)
   - [Chat Experience](#chat-experience)
   - [Conversation Management](#conversation-management)
   - [Other Capabilities](#other-capabilities)
@@ -58,9 +58,104 @@ An intelligent supervisor agent classifies each incoming query and routes it to 
 | LLMs hallucinate on current events | Web Research Agent always searches before answering |
 | Generic chatbots cannot answer questions about your documents | Multi-document RAG Agent with FAISS vector search |
 | Conversations are lost on restart | Full SQLite checkpoint persistence via LangGraph |
-| Follow-up questions derail main conversation flow | Contextual Doubt Window — isolated side-panel for clarifications |
+| Follow-up questions derail main conversation flow | **Contextual Doubt Window** — isolated side-panel for clarifications |
 | Single-model systems cannot specialise | Per-domain specialist agents with dedicated system prompts and tools |
 | PDFs re-embedded on every upload | SHA-256 content hashing prevents duplicate ingestion |
+
+---
+
+## ⭐ Signature Feature: Contextual Doubt Window
+
+> ### Understand Any AI Response Without Interrupting Your Main Conversation
+
+This is the most distinctive feature of this project — and the problem it solves is one that every serious AI user faces.
+
+**The problem:** You receive a detailed, well-structured AI response. But one paragraph contains a term, concept, or step you don't fully understand. If you ask a follow-up question in the main chat, two things happen: the AI loses its train of thought from the original response, and your clean conversation history gets cluttered with tangential clarifications.
+
+**The solution:** A dedicated **Contextual Doubt Window** — a separate chat panel that opens to the right of your main conversation, anchored to a specific AI response. It lets you ask any number of clarifying questions without touching, modifying, or even scrolling away from the original exchange.
+
+### How It Works — Step by Step
+
+```
+1. You ask a question in the main chat
+        │
+        ▼
+2. AI generates a detailed response  ←── Specialist Agent + Tools
+        │
+        ▼
+3. You click ❓ "Ask Doubt" on the response
+        │
+        ▼
+4. Contextual Doubt Window opens on the right  ←── Isolated panel (67% / 33% split)
+        │
+        ▼
+5. You type: "What does StateGraph mean here?"
+        │
+        ▼
+6. Doubt Assistant answers — with original response injected as full context
+        │
+        ▼
+7. You ask follow-ups... the doubt conversation grows independently
+        │
+        ▼
+8. Close the panel — main chat is exactly as you left it  ✓
+```
+
+### Why This Matters for Real AI-Assisted Research
+
+| Ordinary Chatbot | AI Research Assistant |
+|:---|:---|
+| Follow-up derails conversation flow | Doubt panel is completely isolated |
+| AI loses context from previous response | Original response injected as full context |
+| Conversation history becomes messy | Main thread stays clean, doubt is separate |
+| No persistence of clarifications | Doubt conversations stored per-response in SQLite |
+| One conversation handles everything | Two parallel conversation streams |
+
+### Verified Technical Implementation
+
+| Component | Implementation | File |
+|:---|:---|:---|
+| Doubt LLM | Dedicated `ChatGroq` instance, `temperature=0.2` | `core/doubt.py` |
+| Context injection | `DOUBT_SYSTEM_TEMPLATE` injects `{original_prompt}` + `{original_response}` | `core/doubt.py` |
+| Persistence | `doubt_conversations` table stores metadata; `doubt_messages` stores the full thread | `core/memory.py` |
+| Composite key | `"{user_id}:{thread_id}:{message_index}"` — each AI message has an independent doubt thread | `core/memory.py` |
+| Cascade delete | Deleting a main conversation also deletes all its doubt threads (transactional) | `core/memory.py` |
+| Isolation | Doubt LLM calls are entirely separate from the LangGraph graph — no checkpoint side-effects | `core/doubt.py` |
+| UI trigger | Orange `❓ Ask Doubt` button injected via `st.markdown` below each AI message | `frontend/app.py` |
+| Panel layout | `st.columns([0.67, 0.33])` dynamically splits main chat and doubt panel | `frontend/app.py` |
+| Date-grouped history | Chat history grouped into Today / Yesterday / Previous 7 Days / Older | `frontend/app.py` |
+
+**Database Schema:**
+
+```sql
+-- Metadata for each doubt conversation (one per AI response)
+CREATE TABLE doubt_conversations (
+    doubt_id            TEXT PRIMARY KEY,  -- "{user_id}:{thread_id}:{message_index}"
+    user_id             TEXT NOT NULL,
+    parent_thread_id    TEXT NOT NULL,
+    message_index       INTEGER NOT NULL,
+    original_prompt     TEXT,
+    original_response   TEXT,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Messages in the doubt conversation
+CREATE TABLE doubt_messages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    doubt_id   TEXT NOT NULL,
+    role       TEXT NOT NULL,     -- 'user' | 'assistant'
+    content    TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+The doubt system runs as a **completely isolated execution path** — it has no interaction with the main LangGraph checkpoint, does not modify `AgentState`, and cannot affect the main conversation's thread or history.
+
+### Screenshot — Contextual Doubt Window in Action
+
+![Contextual Doubt Window](docs/screenshots/contextual-doubt-window.png)
+
+*The Contextual Doubt Window in action: the main AI response is displayed in the left panel (67% width) while a separate doubt conversation — anchored to that specific response — runs independently in the right panel (33% width). The original response context is automatically injected so the Doubt Assistant understands what is being asked about. Closing the panel leaves the main conversation completely unchanged.*
 
 ---
 
@@ -140,71 +235,11 @@ Document intelligence is handled end-to-end in `tools/tools.py` with full isolat
 
 ---
 
-### 🔍 Contextual Doubt Window
-
-> **"Understand Any AI Response Without Interrupting Your Main Conversation"**
-
-This is one of the most distinctive features of this project. It solves a common problem: you receive a detailed AI response, but one paragraph contains a term or concept you do not fully understand. If you ask a follow-up question in the main chat, it can derail the conversation or cause the AI to lose context from the original response.
-
-#### How It Works
-
-1. The user receives an AI-generated response in the main chat.
-2. A small **orange `❓ Ask Doubt`** button appears at the bottom-right of every AI response.
-3. The user clicks the icon. A separate **Doubt Chat Panel** opens on the right side of the screen.
-4. The original user question and the full AI response are automatically injected as context for the Doubt Assistant.
-5. The user asks any clarifying question — about a specific word, concept, code snippet, or step.
-6. The **Contextual Doubt Assistant** (powered by Groq) responds with a focused explanation anchored to the original response.
-7. The user can continue the doubt conversation with as many follow-up questions as needed.
-8. When done, the doubt panel can be closed without affecting the main conversation.
-
-#### Verified Technical Implementation
-
-| Component | Implementation | File |
-|:---|:---|:---|
-| Doubt LLM | Dedicated `ChatGroq` instance, `temperature=0.2` | `core/doubt.py` |
-| Streaming | `stream_doubt_answer()` yields tokens for real-time rendering | `core/doubt.py` |
-| Context injection | `DOUBT_SYSTEM_TEMPLATE` injects `{original_prompt}` + `{original_response}` | `core/doubt.py` |
-| Persistence | `doubt_conversations` table stores metadata; `doubt_messages` stores the full thread | `core/memory.py` |
-| Composite key | `"{user_id}:{thread_id}:{message_index}"` — each AI message has an independent doubt thread | `core/memory.py` |
-| Cascade delete | Deleting a main conversation also deletes all its doubt threads (transactional) | `core/memory.py` |
-| Isolation | Doubt LLM calls are entirely separate from the LangGraph graph — no checkpoint side-effects | `core/doubt.py` |
-| UI trigger | Floating orange button injected via `st.markdown` below each AI message | `frontend/app.py` |
-| Panel layout | `st.columns([3, 2])` splits main chat and doubt panel dynamically | `frontend/app.py` |
-
-**Database Schema:**
-
-```sql
--- Metadata for each doubt conversation (one per AI response)
-CREATE TABLE doubt_conversations (
-    doubt_id            TEXT PRIMARY KEY,  -- "{user_id}:{thread_id}:{message_index}"
-    user_id             TEXT NOT NULL,
-    parent_thread_id    TEXT NOT NULL,
-    message_index       INTEGER NOT NULL,
-    original_prompt     TEXT,
-    original_response   TEXT,
-    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Messages in the doubt conversation
-CREATE TABLE doubt_messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    doubt_id   TEXT NOT NULL,
-    role       TEXT NOT NULL,     -- 'user' | 'assistant'
-    content    TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-The doubt system runs as a **completely isolated execution path** — it has no interaction with the main LangGraph checkpoint, does not modify `AgentState`, and cannot affect the main conversation's thread or history.
-
----
-
 ### Chat Experience
 
 | Feature | Status | Details |
 |:---|:---:|:---|
 | **Copy AI Response** | ✅ | Clipboard copy button on every AI message |
-| **Regenerate Response** | ✅ | Rewinds LangGraph checkpoint to last `HumanMessage`, re-streams |
 | **Edit User Message** | ✅ | Inline ✏️ edit button; rewrites checkpoint from that point forward |
 | **Stop Generation** | ✅ | Stop flag checked during streaming; avoids corrupted state |
 | **Conversation Search** | ✅ | Searches thread titles + checkpoint message content in SQLite |
@@ -225,6 +260,7 @@ The doubt system runs as a **completely isolated execution path** — it has no 
 - **Unlimited conversations** — each stored as an isolated LangGraph thread in SQLite
 - **Persistent history** — full conversation restored from checkpoints on page reload
 - **Auto-title generation** — first message is used to name the thread automatically
+- **Date-grouped chat history** — conversations organized into Today / Yesterday / Previous 7 Days / Older
 - **Rename conversations** — inline rename with validation (max 120 chars)
 - **Delete conversations** — transactional deletion: checkpoints + titles + feedback + doubt threads
 - **Per-user isolation** — composite key `{user_id}:{thread_id}` prevents cross-user data access
@@ -262,30 +298,29 @@ The doubt system runs as a **completely isolated execution path** — it has no 
 
 ## 📸 Application Screenshots
 
-> **Note on screenshots:** The application is running and fully functional at `http://localhost:8501`. Real screenshots need to be captured manually and placed in `docs/screenshots/`. Placeholder filenames are listed below so the structure is ready.
+> Screenshots captured from the live application running at `http://localhost:8501`.
 
-### Screenshots Needed — Please Capture These
+### Welcome Screen
 
-To complete the visual documentation, open the application at `http://localhost:8501` and capture the following screenshots. Save them to `docs/screenshots/` with the exact filenames listed:
+The welcome screen greets new users with four capability cards covering all supported research modes.
 
-| # | Screenshot | Filename | Instructions |
-|:--:|:---|:---|:---|
-| 1 | **Welcome / Dashboard** | `01_welcome_screen.png` | Open a new chat; capture the hero header + 4 capability cards |
-| 2 | **Main Chat — AI Response** | `02_chat_response.png` | Ask a question (e.g. "What is LangGraph?"); capture the exchange with agent badge |
-| 3 | **Contextual Doubt Window** | `03_doubt_window.png` | Click "Ask Doubt" on an AI response; capture the split panel |
-| 4 | **Document Upload** | `04_document_upload.png` | Sidebar with a document uploaded and shown in the list |
-| 5 | **Document Q&A with Citations** | `05_rag_citations.png` | Ask a question about an uploaded PDF; capture the response with source citations |
-| 6 | **Web Research Response** | `06_web_research.png` | Ask a current-events question; capture the Research badge + Sources section |
-| 7 | **Conversation Sidebar** | `07_conversation_list.png` | Several named conversations in the sidebar with rename/delete icons |
-| 8 | **Light Theme** | `08_light_theme.png` | Switch to Light theme; capture the full interface |
-| 9 | **Coding Assistant** | `09_coding_response.png` | Ask for code (e.g. "Write a Python binary search"); capture formatted code block |
+> *Screenshot coming soon — capture from http://localhost:8501 on a fresh chat and save as `docs/screenshots/01_welcome_screen.png`*
 
-Once you place these in `docs/screenshots/`, update this section with:
+### Main Chat — AI Response with Agent Badge
 
-```markdown
-![Welcome Screen](docs/screenshots/01_welcome_screen.png)
-*Welcome screen with capability cards*
-```
+> *Save as `docs/screenshots/02_chat_response.png`*
+
+### Contextual Doubt Window ⭐
+
+See the [Signature Feature section](#-signature-feature-contextual-doubt-window) above for the full screenshot and description.
+
+### Document Q&A with Citations
+
+> *Save as `docs/screenshots/05_rag_citations.png`*
+
+### Web Research Response
+
+> *Save as `docs/screenshots/06_web_research.png`*
 
 ---
 
@@ -318,20 +353,20 @@ flowchart TD
     GT --> GN
     GN --> |AI Response| SF
 
-    SF --> |"Ask Doubt click"| DW[Doubt Window Panel\nfrontend/app.py]
-    DW --> DA[Doubt Assistant\ncore/doubt.py\nGroq • temp=0.2 • streaming]
+    SF --> |"❓ Ask Doubt click"| DW[Contextual Doubt Window\nfrontend/app.py\nst.columns 67/33 split]
+    DW --> DA[Doubt Assistant\ncore/doubt.py\nGroq • temp=0.2\nOriginal context injected]
     DA --> |"Streamed clarification"| DW
 
-    SV -.->|Checkpoint reads/writes| DB[(SQLite\nchatbot.db\nLangGraph checkpoints\nthread_titles\nuser_settings\nmessage_feedback\ndoubt_conversations\ndoubt_messages)]
+    SV -..->|Checkpoint reads/writes| DB[(SQLite\nchatbot.db\nLangGraph checkpoints\nthread_titles • updated_at\nuser_settings\nmessage_feedback\ndoubt_conversations\ndoubt_messages)]
 
-    DA -.->|Doubt persistence| DB
+    DA -..->|Doubt persistence| DB
 
-    RAT -.->|Vector search| VS[(FAISS Index\ndata/vector_stores\nper user + thread\nindex.faiss + index.pkl\nmetadata.json)]
+    RAT -..->|Vector search| VS[(FAISS Index\ndata/vector_stores\nper user + thread\nindex.faiss + index.pkl\nmetadata.json)]
 
-    SF -.->|Upload| ING[Document Ingestion\ntools/tools.py\nPDF·DOCX·TXT·MD\nSHA-256 dedup\nChunking·Embedding]
-    ING -.->|Save index| VS
+    SF -..->|Upload| ING[Document Ingestion\ntools/tools.py\nPDF·DOCX·TXT·MD\nSHA-256 dedup\nChunking·Embedding]
+    ING -..->|Save index| VS
 
-    GN -.->|Optional| MCP[MCP Server\nstreamable_http\nMCP_SERVER_URL]
+    GN -..->|Optional| MCP[MCP Server\nstreamable_http\nMCP_SERVER_URL]
 ```
 
 ### Execution Paths
@@ -411,7 +446,8 @@ multi-agent-AI-research-assistant/
 │               └── metadata.json
 │
 ├── docs/
-│   └── screenshots/            # Application screenshots (see §Screenshots)
+│   └── screenshots/            # Application screenshots
+│       └── contextual-doubt-window.png   # ⭐ Signature feature screenshot
 │
 ├── .streamlit/
 │   └── config.toml             # Streamlit theme, server config, file watcher
@@ -588,8 +624,9 @@ GROQ_API_KEY=gsk_your_key docker compose up -d
 - [x] SHA-256 duplicate document detection
 - [x] SQLite conversation persistence with LangGraph checkpointer
 - [x] Rename, delete, and search conversations
-- [x] Copy response, regenerate, edit message, stop generation
-- [x] Contextual Doubt Window (isolated side-panel + dedicated database)
+- [x] Date-grouped chat history (Today / Yesterday / Previous 7 Days / Older)
+- [x] Copy response, edit message, stop generation
+- [x] **Contextual Doubt Window** (isolated side-panel + dedicated database + cascade delete)
 - [x] Dark and Light theme with orange/coral palette
 - [x] Conversation export to Markdown and plain text
 - [x] Message feedback (thumbs up / down)
@@ -597,16 +634,14 @@ GROQ_API_KEY=gsk_your_key docker compose up -d
 - [x] Docker containerisation with volume persistence
 - [x] LangSmith observability integration
 
-### 🔄 In Progress / Partial
-- [ ] Demo GIF showing the full Contextual Doubt Window workflow
-
 ### 📋 Planned
 - [ ] **Select-to-Ask** — select a word or phrase in an AI response to open a doubt query pre-filled with the selection
+- [ ] **Demo GIF** — animated walkthrough of the full Contextual Doubt Window workflow
 - [ ] **Hybrid retrieval** — combine BM25 keyword search with FAISS semantic search for improved recall
 - [ ] **Reranking** — cross-encoder reranker to improve passage relevance before generation
 - [ ] **Long-term memory** — summarisation-based memory for conversations exceeding context windows
 - [ ] **User authentication** — login system for persistent multi-user deployments
-- [ ] **PostgreSQL migration** — replace SQLite with PostgreSQL for production scale (migration path documented in `core/memory.py`)
+- [ ] **PostgreSQL migration** — replace SQLite with PostgreSQL for production scale
 - [ ] **Advanced evaluation** — LangSmith dataset-based evaluation for RAG quality metrics
 - [ ] **Voice input** — speech-to-text query entry
 
